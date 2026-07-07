@@ -1,0 +1,33 @@
+# Runtime and cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local experiment outputs
+results/
+
+# Downloaded benchmark assets
+datasets/*/videos/
+datasets/**/*.mp4
+datasets/**/*.mkv
+datasets/**/*.webm
+datasets/**/*.avi
+datasets/**/*.mov
+datasets/**/*.zip
+datasets/**/*.parquet
+
+# Local archives and checkpoints
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.bundle
+models/
+checkpoints/
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
