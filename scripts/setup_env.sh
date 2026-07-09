@@ -28,7 +28,7 @@ echo ""
 echo "=== Installing core dependencies ==="
 conda run -n "$ENV_NAME" pip install \
   transformers==4.48.0 \
-  'datasets>=2.14,<3' \
+  "datasets>=2.14" \
   accelerate \
   qwen-vl-utils==0.0.10 \
   av==14.0.0 \
