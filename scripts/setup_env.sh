@@ -20,9 +20,9 @@ echo "=== Creating conda environment: $ENV_NAME (Python $PYTHON_VER) ==="
 conda create -n "$ENV_NAME" "python=$PYTHON_VER" -y
 
 echo ""
-echo "=== Installing PyTorch 2.6.0 (CUDA 12.1) ==="
+echo "=== Installing PyTorch 2.6.0 (CUDA 12.4) ==="
 conda run -n "$ENV_NAME" pip install torch==2.6.0 torchvision==0.21.0 \
-  --index-url https://download.pytorch.org/whl/cu121
+  --index-url https://download.pytorch.org/whl/cu124
 
 echo ""
 echo "=== Installing core dependencies ==="
