@@ -25,6 +25,7 @@ datasets/**/*.parquet
 *.zip
 *.bundle
 models/
+!src/specvlm/models/
 checkpoints/
 
 # Editor and OS files
