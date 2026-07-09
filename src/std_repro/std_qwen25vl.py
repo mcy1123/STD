@@ -8,25 +8,19 @@ and dense full-attention verification.
 from __future__ import annotations
 
 import math
-import sys
 import time
 import types
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
 
-SPECVLM_ROOT = Path("/home/mcy/projects/SpecVLM")
-if str(SPECVLM_ROOT) not in sys.path:
-    sys.path.insert(0, str(SPECVLM_ROOT))
-
-from kv_cache.kv_cache import initialize_past_key_values  # noqa: E402
-from models import modeling_qwen2_5_vl as qwen_mod  # noqa: E402
-from std_repro.triton_attention import fused_gqa_attention  # noqa: E402
-from utils.utils import get_last_video_idx  # noqa: E402
+from specvlm.kv_cache.kv_cache import initialize_past_key_values
+from specvlm.models import modeling_qwen2_5_vl as qwen_mod
+from specvlm.utils.utils import get_last_video_idx
+from std_repro.triton_attention import fused_gqa_attention
 
 
 @dataclass

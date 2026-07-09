@@ -24,8 +24,8 @@ def existing_video(output_dir: Path, video_id: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--metadata-path", default="/home/mcy/projects/Std/datasets/Video-MME")
-    parser.add_argument("--output-dir", default="/home/mcy/projects/Std/datasets/Video-MME/videos")
+    parser.add_argument("--metadata-path", default=str(Path(__file__).resolve().parents[1] / "datasets" / "Video-MME"))
+    parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parents[1] / "datasets" / "Video-MME" / "videos"))
     parser.add_argument("--split", default="test")
     parser.add_argument("--duration", choices=["short", "medium", "long", "all"], default="short")
     parser.add_argument("--limit", type=int, default=1)

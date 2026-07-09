@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 
 import benchmark_std as bench
-from models.processing_qwen2_5_vl import Qwen2_5_VLProcessor
+from specvlm.models.processing_qwen2_5_vl import Qwen2_5_VLProcessor
 from qwen_vl_utils import process_vision_info
 
 
@@ -33,10 +33,10 @@ def make_inputs_cpu(processor, video_path: str, question: str, frame_num: int, m
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", default="/home/mcy/projects/models/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model-path", default=str(Path(__file__).resolve().parents[1] / "models" / "Qwen2.5-VL-7B-Instruct"))
     parser.add_argument("--dataset", choices=["VideoDetailCaption", "MLVU", "Video-MME"], default="Video-MME")
-    parser.add_argument("--data-path", default="/home/mcy/projects/Std/datasets/Video-MME")
-    parser.add_argument("--video-root", default="/home/mcy/projects/Std/datasets/Video-MME/videos")
+    parser.add_argument("--data-path", default=str(Path(__file__).resolve().parents[1] / "datasets" / "Video-MME"))
+    parser.add_argument("--video-root", default=str(Path(__file__).resolve().parents[1] / "datasets" / "Video-MME" / "videos"))
     parser.add_argument("--split", default="test")
     parser.add_argument("--prompt-style", choices=["direct", "cot"], default="cot")
     parser.add_argument("--eval-num", type=int, default=1)

@@ -4,7 +4,7 @@
 Examples:
   conda run -n specvlm python scripts/benchmark_std.py \
     --dataset VideoDetailCaption \
-    --data-path /home/mcy/projects/SpecVLM/datasets/VideoDetailCaption \
+    --data-path datasets/VideoDetailCaption \
     --eval-num 1 --frame-num 32 --max-new-tokens 64
 """
 
@@ -24,13 +24,11 @@ from datasets import load_dataset
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-SPECVLM_ROOT = Path("/home/mcy/projects/SpecVLM")
-for path in (SRC, SPECVLM_ROOT):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-from models.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration  # noqa: E402
-from models.processing_qwen2_5_vl import Qwen2_5_VLProcessor  # noqa: E402
+from specvlm.models.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration  # noqa: E402
+from specvlm.models.processing_qwen2_5_vl import Qwen2_5_VLProcessor  # noqa: E402
 from qwen_vl_utils import process_vision_info  # noqa: E402
 from std_repro.std_qwen25vl import (  # noqa: E402
     ar_generate_qwen25vl,
@@ -217,9 +215,9 @@ def iter_samples(args):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", default="/home/mcy/projects/models/Qwen2.5-VL-7B-Instruct")
-    parser.add_argument("--dataset", choices=["VideoDetailCaption", "MLVU", "Video-MME"], default="VideoDetailCaption")
-    parser.add_argument("--data-path", default="/home/mcy/projects/SpecVLM/datasets/VideoDetailCaption")
+    parser.add_argument("--model-path", default=str(ROOT / "models" / "Qwen2.5-VL-7B-Instruct"))
+    parser.add_argument("--dataset", choices=["VideoDetailCaption", "MLVU", "Video-MME"], default="Video-MME")
+    parser.add_argument("--data-path", default=str(ROOT / "datasets" / "Video-MME"))
     parser.add_argument("--video-root", default=None)
     parser.add_argument("--split", default="test")
     parser.add_argument("--prompt-style", choices=["direct", "cot"], default="direct")

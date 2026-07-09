@@ -22,7 +22,7 @@ DATASETS = {
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["MLVU", "Video-MME", "all"], default="all")
-    parser.add_argument("--output-root", default="/home/mcy/projects/Std/datasets")
+    parser.add_argument("--output-root", default=str(Path(__file__).resolve().parents[1] / "datasets"))
     parser.add_argument("--full", action="store_true", help="Download every file in the selected dataset repo.")
     parser.add_argument(
         "--videomme-chunks",

@@ -1,181 +1,168 @@
-# STD 复现傻瓜指南
+# STD 复现 — 傻瓜指南
 
-把代码拷到 A100 服务器上，按顺序执行下面几步，直接出结果。
-
----
-
-## 第 0 步：拷代码
-
-```bash
-# 在本地机器上打包
-tar czf std.tar.gz -C /home/mcy/projects Std/src Std/scripts
-tar czf specvlm.tar.gz -C /home/mcy/projects SpecVLM --exclude=datasets --exclude=results --exclude=.git
-
-# 传到 A100
-scp std.tar.gz specvlm.tar.gz user@a100-server:/data/
-
-# 在 A100 上解压
-cd /data
-tar xzf std.tar.gz
-tar xzf specvlm.tar.gz
-```
-
-解压后的目录结构：
-
-```text
-/data/
-├── Std/
-│   ├── src/std_repro/
-│   └── scripts/
-└── SpecVLM/
-    ├── models/
-    ├── kv_cache/
-    └── utils/
-```
+从头到尾，一个脚本搞定环境，几条命令出结果。
 
 ---
 
-## 第 1 步：装环境（一次性）
+## 前置条件
+
+- Linux 服务器（A100 80GB 或 H100 推荐）
+- 已安装 conda
+- HuggingFace 账号（用于下载模型和数据集）
+
+---
+
+## 第 1 步：克隆代码
 
 ```bash
-conda create -n specvlm python=3.10 -y
-conda activate specvlm
-
-pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
-pip install transformers==4.48.0 datasets accelerate "numpy<2.0"
-pip install qwen-vl-utils==0.0.10 av==14.0.0 triton==3.2.0
-pip install huggingface_hub
+git clone <this-repo-url> STD
+cd STD
 ```
+
+**注意**：本仓库已自包含 SpecVLM 依赖，无需额外 clone 任何仓库。
+
+---
+
+## 第 2 步：装环境（一次性，约 5 分钟）
+
+```bash
+bash scripts/setup_env.sh
+```
+
+这会创建 `specvlm` conda 环境并安装所有依赖。
 
 验证：
 
 ```bash
-python -c "import torch; print(torch.cuda.get_device_name(0)); print(torch.cuda.device_count())"
-# 应该输出：NVIDIA A100-SXM4-80GB 和 GPU 数量
-```
-
----
-
-## 第 2 步：下载模型（一次性）
-
-```bash
-huggingface-cli download Qwen/Qwen2.5-VL-7B-Instruct \
-  --local-dir /data/models/Qwen2.5-VL-7B-Instruct
-```
-
-约 16 GB，几分钟。
-
----
-
-## 第 3 步：登录 HuggingFace + 申请 MLVU 访问（一次性）
-
-```bash
-huggingface-cli login
-# 输入你的 HF token（去 https://huggingface.co/settings/tokens 创建）
-```
-
-然后浏览器打开 https://huggingface.co/datasets/MLVU/MVLU ，点 "Access repository" 申请访问，填写姓名、机构、用途（填 Research）。
-
----
-
-## 第 4 步：下载 MLVU 数据集 + 视频（一次性）
-
-```bash
-cd /data/Std
-
-# 下载 MLVU annotation（json 文件）
-conda run -n specvlm python scripts/prepare_std_datasets.py --dataset MLVU
-
-# 下载 MLVU 视频（从 YouTube，需要较长时间）
-# MLVU 的视频 URL 在 json annotation 里，用 yt-dlp 下载
-pip install yt-dlp
-
-python -c "
-import json, os, subprocess
-from pathlib import Path
-
-json_dir = Path('datasets/MLVU/MLVU/json')
-video_dir = Path('datasets/MLVU/videos')
-video_dir.mkdir(parents=True, exist_ok=True)
-
-for json_file in sorted(json_dir.glob('*.json')):
-    data = json.loads(json_file.read_text())
-    for item in data:
-        url = item.get('video') or item.get('video_path') or ''
-        video_id = item.get('video_id', '')
-        if not url or not video_id:
-            continue
-        out_path = video_dir / f'{video_id}.mp4'
-        if out_path.exists():
-            continue
-        print(f'Downloading {video_id}: {url}')
-        subprocess.run([
-            'yt-dlp', '-f', 'best', '-o', str(out_path),
-            '--no-playlist', url
-        ], check=False)
+conda run -n specvlm python -c "
+import torch
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'Count: {torch.cuda.device_count()}')
 "
 ```
 
-如果下载慢或者部分视频失效，可以先跑有视频的部分看看结果，不用等全部下完。
+---
+
+## 第 3 步：下载模型（一次性，约 16 GB）
+
+```bash
+huggingface-cli download Qwen/Qwen2.5-VL-7B-Instruct \
+  --local-dir models/Qwen2.5-VL-7B-Instruct
+```
 
 ---
 
-## 第 5 步：跑实验
-
-论文配置：`K+text=1024`，`γ=9`，CoT prompt，batch_size=8。
-当前脚本内部的 STD 生成器仍是单 sample 解码，因此这里跑的是
-batch_size=1 的论文超参配置；不要把它当作论文表 1 的 batch=8 结果。
+## 第 4 步：下载 Video-MME 数据集（一次性）
 
 ```bash
-cd /data/Std
+# 下载 metadata + 第一批视频
+conda run -n specvlm python scripts/prepare_std_datasets.py --dataset Video-MME
 
+# 解压视频
+conda run -n specvlm python scripts/extract_videomme_chunks.py --chunks 01
+
+# 从 YouTube 补充下载（可选，需要 yt-dlp）
+pip install yt-dlp
+conda run -n specvlm python scripts/download_videomme_youtube.py \
+  --duration short --limit 20
+```
+
+---
+
+## 第 5 步：Smoke Test（验证链路）
+
+```bash
+SPECVLM_MAX_CACHE_LEN=40960 conda run -n specvlm python scripts/benchmark_std.py \
+  --model-path models/Qwen2.5-VL-7B-Instruct \
+  --dataset Video-MME \
+  --data-path datasets/Video-MME \
+  --video-root datasets/Video-MME/videos \
+  --eval-num 3 \
+  --frame-num 32 \
+  --max-new-tokens 64 \
+  --gamma 9 \
+  --target-k-plus-text 1024 \
+  --prompt-style cot \
+  --gpu-ids 0
+```
+
+输出 JSONL 指标到 `results/std_qwen2_5_vl_7b/`。
+
+---
+
+## 第 6 步：跑论文配置
+
+```bash
+# 256 帧，论文 K+text=1024, gamma=9, CoT
 SPECVLM_MAX_CACHE_LEN=163840 conda run -n specvlm python scripts/benchmark_std.py \
-  --model-path /data/models/Qwen2.5-VL-7B-Instruct \
-  --dataset MLVU \
-  --data-path MLVU/MVLU \
-  --video-root /data/Std/datasets/MLVU/videos \
-  --eval-num 10 \
+  --model-path models/Qwen2.5-VL-7B-Instruct \
+  --dataset Video-MME \
+  --data-path datasets/Video-MME \
+  --video-root datasets/Video-MME/videos \
+  --eval-num 30 \
   --frame-num 256 \
   --max-new-tokens 128 \
   --gamma 9 \
   --target-k-plus-text 1024 \
   --prompt-style cot \
   --sparse-attn-mode triton_gqa \
-  --gpu-ids 0 \
-  --output results/mlvu_256f_kplus1024_g9.jsonl
+  --gpu-ids 0
 ```
 
 ---
 
-## 第 6 步：看结果
+## 第 7 步：查看结果
 
 ```bash
-conda run -n specvlm python scripts/summarize_metrics.py results/mlvu_256f_kplus1024_g9.jsonl
+conda run -n specvlm python scripts/summarize_metrics.py \
+  results/std_qwen2_5_vl_7b/*.jsonl
 ```
 
 输出示例：
 
 ```text
-samples: 10
+samples: 30
+token_equal: 30/30
 speedup: 1.xxx
 acceptance_rate: 0.xxx
 mean_accept_length: x.xxx
-ar_decoding_time: x.xxxs
-std_decoding_time: x.xxxs
 ```
 
-**看 `speedup` 就行**，>1.0 说明 STD 比原版 AR 解码快。
+**看 `speedup` 就行** — >1.0 说明 STD 比原版 AR 解码快。
 
 ---
 
-## 参数说明
-
-论文核心就三个参数，想调可以调：
+## 参数速查
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--target-k-plus-text 1024` | 1024 | 稀疏 KV 保留量，越小越快但接受率越低 |
+| `--frame-num 256` | 32 | 视频帧数，越高稀疏收益越大 |
+| `--target-k-plus-text 1024` | 1024 | 稀疏 KV 预算，越小越快但接受率越低 |
 | `--gamma 9` | 9 | 每轮 draft 的 token 数 |
-| `--frame-num 256` | 256 | 视频采样帧数，MLVU 视频长建议 256+ |
+| `--max-new-tokens 128` | 64 | 最大生成 token 数 |
+| `--sparse-attn-mode triton_gqa` | gqa_sdpa | H100/A100 推荐 triton_gqa |
+| `--gpu-ids 0` | 0,1,2,3 | A100/H100 单卡即可 |
 
-如果 OOM，先降帧数：`--frame-num 128`。如果显存充裕，升到 384 或 512，加速比通常更好。
+**如果 OOM**：降帧数 `--frame-num 128`。**如果显存充裕**：升到 384 或 512。
+
+---
+
+## 环境变量
+
+- `SPECVLM_MAX_CACHE_LEN` — KV cache 预分配长度：
+  - 32 帧 → `40960`
+  - 256 帧 → `163840`
+  - 384 帧 → `245760`
+
+---
+
+## 可选：MLVU 数据集
+
+MLVU 需要手动申请 HuggingFace 访问权限：
+1. `huggingface-cli login`
+2. 访问 https://huggingface.co/datasets/MLVU/MVLU 点 "Access repository"
+
+```bash
+conda run -n specvlm python scripts/prepare_std_datasets.py --dataset MLVU
+# 视频需要从 YouTube 手动下载
+```

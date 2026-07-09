@@ -25,8 +25,8 @@ def main() -> None:
     parser.add_argument("--sparse-attn-mode", choices=["gqa_sdpa", "repeat_sdpa", "triton_gqa"], default="gqa_sdpa")
     parser.add_argument("--strict-equality", action="store_true")
     parser.add_argument("--dataset", default="VideoDetailCaption")
-    parser.add_argument("--data-path", default="/home/mcy/projects/SpecVLM/datasets/VideoDetailCaption")
-    parser.add_argument("--output-dir", default="/home/mcy/projects/Std/results/std_qwen2_5_vl_7b/sweeps")
+    parser.add_argument("--data-path", default=str(Path(__file__).resolve().parents[1] / "datasets" / "Video-MME"))
+    parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parents[1] / "results" / "std_qwen2_5_vl_7b" / "sweeps"))
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)

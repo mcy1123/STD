@@ -34,9 +34,9 @@ def parse_int_list(value: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", default="/home/mcy/projects/models/Qwen2.5-VL-7B-Instruct")
-    parser.add_argument("--dataset", choices=["VideoDetailCaption", "MLVU", "Video-MME"], default="VideoDetailCaption")
-    parser.add_argument("--data-path", default="/home/mcy/projects/SpecVLM/datasets/VideoDetailCaption")
+    parser.add_argument("--model-path", default=str(ROOT / "models" / "Qwen2.5-VL-7B-Instruct"))
+    parser.add_argument("--dataset", choices=["VideoDetailCaption", "MLVU", "Video-MME"], default="Video-MME")
+    parser.add_argument("--data-path", default=str(ROOT / "datasets" / "Video-MME"))
     parser.add_argument("--video-root", default=None)
     parser.add_argument("--split", default="test")
     parser.add_argument("--prompt-style", choices=["direct", "cot"], default="direct")
