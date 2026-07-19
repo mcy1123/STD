@@ -14,12 +14,14 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 import av
 import torch
 from datasets import load_dataset
+from tqdm import tqdm
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -252,9 +254,26 @@ def main() -> None:
     model, processor = load_qwen_model(args.model_path, args.gpu_ids)
     eos_token_id = processor.tokenizer.eos_token_id
 
+    # Pre-load samples for accurate progress bar
+    samples = list(iter_samples(args))
+    print(f"\n{'='*60}")
+    print(f"Dataset: {args.dataset}  |  Samples: {len(samples)}  |  Frames: {args.frame_num}")
+    print(f"Max tokens: {args.max_new_tokens}  |  Gamma: {args.gamma}  |  K+text: {args.target_k_plus_text}")
+    print(f"Sparse attn: {args.sparse_attn_mode}  |  Verify: {args.verify_mode}  |  Prompt: {args.prompt_style}")
+    print(f"Output: {output_path}")
+    print(f"{'='*60}\n")
+
+    total_ar_time = 0.0
+    total_std_time = 0.0
+    total_speedups = []
+
     with output_path.open("w", encoding="utf-8") as f:
-        for sample_index, sample in enumerate(iter_samples(args)):
-            print(f"[{sample_index}] {sample['sample_id']} {sample['video_path']}", flush=True)
+        pbar = tqdm(total=len(samples), desc="STD benchmark", unit="sample",
+                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
+        for sample_index, sample in enumerate(samples):
+            pbar.set_postfix_str(f"loading: {sample['sample_id']}")
+
+            t0 = time.time()
             inputs = make_qwen_video_inputs(
                 processor,
                 sample["video_path"],
@@ -264,7 +283,11 @@ def main() -> None:
                 args.max_pixels,
             )
             prompt_len = int(inputs["input_ids"].shape[1])
+            print(f"  [{sample_index}] {sample['sample_id']}  prompt_len={prompt_len}", flush=True)
 
+            # AR decoding
+            print(f"         AR decoding...", end=" ", flush=True)
+            t_ar = time.time()
             ar = ar_generate_qwen25vl(
                 model,
                 inputs,
@@ -272,6 +295,12 @@ def main() -> None:
                 eos_token_id=eos_token_id,
                 max_new_tokens=args.max_new_tokens,
             )
+            ar_dt = time.time() - t_ar
+            print(f"done ({ar_dt:.1f}s, {ar.generate_len} tokens)", flush=True)
+
+            # STD decoding
+            print(f"         STD decoding...", end=" ", flush=True)
+            t_std = time.time()
             std, selection = std_generate_qwen25vl(
                 model,
                 inputs,
@@ -286,6 +315,8 @@ def main() -> None:
                 sparse_attn_mode=args.sparse_attn_mode,
                 copy_sparse_prefill=not args.no_copy_sparse_prefill,
             )
+            std_dt = time.time() - t_std
+            print(f"done ({std_dt:.1f}s, {std.generate_len} tokens)", flush=True)
 
             speedup = ar.decoding_time / std.decoding_time if std.decoding_time else 0.0
             token_equal = tokens_equal(
@@ -294,6 +325,22 @@ def main() -> None:
             )
             if args.strict_equality and not token_equal:
                 raise RuntimeError(f"STD token mismatch on sample {sample['sample_id']}.")
+
+            total_ar_time += ar.decoding_time
+            total_std_time += std.decoding_time
+            total_speedups.append(speedup)
+            avg_speedup = sum(total_speedups) / len(total_speedups)
+
+            pbar.set_postfix_str(
+                f"AR={ar.decoding_time:.1f}s STD={std.decoding_time:.1f}s "
+                f"speedup={speedup:.2f}x acc={std.acceptance_rate:.2f} "
+                f"ok={'✓' if token_equal else '✗'}"
+            )
+            pbar.update(1)
+            print(f"         AR={ar.decoding_time:.2f}s  STD={std.decoding_time:.2f}s  "
+                  f"speedup={speedup:.2f}x  accept={std.acceptance_rate:.2f}  "
+                  f"match={'✓' if token_equal else '✗'}  "
+                  f"avg_speedup={avg_speedup:.2f}x", flush=True)
 
             record = {
                 "dataset": args.dataset,
@@ -329,9 +376,18 @@ def main() -> None:
                 "bonus_time": std.bonus_time,
                 "cache_adjust_time": std.cache_adjust_time,
             }
-            print(json.dumps(record, ensure_ascii=False), flush=True)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
+
+        pbar.close()
+        print(f"\n{'='*60}")
+        print(f"Done. {len(samples)} samples → {output_path}")
+        print(f"Total AR decoding:  {total_ar_time:.1f}s")
+        print(f"Total STD decoding: {total_std_time:.1f}s")
+        print(f"Overall speedup:     {total_ar_time / total_std_time:.2f}x" if total_std_time > 0 else "")
+        print(f"Mean per-sample:     {sum(total_speedups) / len(total_speedups):.2f}x")
+        print(f"Token match:         {sum(1 for s in total_speedups if s > 0)}/{len(total_speedups)}")
+        print(f"{'='*60}")
 
 
 if __name__ == "__main__":
