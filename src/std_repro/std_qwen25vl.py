@@ -57,21 +57,18 @@ class GenerateResult:
     verify_time: float = 0.0
     bonus_time: float = 0.0
     cache_adjust_time: float = 0.0
+    cache_init_time: float = 0.0
+    prefill_time: float = 0.0
+    selection_prefill_time: float = 0.0
+    selection_time: float = 0.0
+    dense_prefill_time: float = 0.0
+    sparse_cache_time: float = 0.0
 
     @property
     def acceptance_rate(self) -> float:
         if self.proposed_draft_tokens == 0:
             return 0.0
         return self.accepted_draft_tokens / self.proposed_draft_tokens
-
-
-def clone_tensor_dict(inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Clone tensor values so prefill helpers can slice without mutating callers."""
-
-    cloned = {}
-    for key, value in inputs.items():
-        cloned[key] = value.clone() if torch.is_tensor(value) else value
-    return cloned
 
 
 def _first_model_device(model) -> torch.device:
@@ -133,9 +130,11 @@ def prefill_prompt(
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, ...]], int]:
     """Prefill video-prefix then text suffix, matching SpecVLM's Qwen path."""
 
-    local_inputs = clone_tensor_dict(inputs)
     device = _first_model_device(model)
-    local_inputs = _move_inputs(local_inputs, device)
+    # _move_inputs() creates a new dictionary. The tensors themselves are never
+    # mutated, so cloning the full video tensor here only adds a large device-to-
+    # device copy for every prefill.
+    local_inputs = _move_inputs(inputs, device)
 
     input_ids = local_inputs["input_ids"]
     last_video_idx = get_last_video_idx(input_ids[0], video_token_id)
@@ -186,18 +185,29 @@ def build_sparse_selection(
     layer_positions: List[torch.Tensor] = []
     for layer_attn in attentions:
         # [batch, query_heads, text_len, prompt_len]
-        attn = layer_attn.detach().float().cpu()[0]
+        # Keep the large attention tensor and reductions on its owning GPU. The
+        # previous implementation converted every full layer to fp32 on CPU,
+        # transferring several GB per prompt. Only the selected indices need to
+        # live on CPU for the long-lived SparseSelection metadata.
+        attn = layer_attn.detach()[0]
+        visual_positions_device = visual_positions.to(attn.device)
         query_heads = attn.shape[0]
+        if query_heads % num_key_value_heads != 0:
+            raise ValueError(
+                f"Query heads ({query_heads}) must be divisible by KV heads ({num_key_value_heads})."
+            )
         heads_per_kv = query_heads // num_key_value_heads
-        per_kv = []
-        for kv_head in range(num_key_value_heads):
-            h0 = kv_head * heads_per_kv
-            h1 = (kv_head + 1) * heads_per_kv
-            grouped = attn[h0:h1, :, visual_positions]
-            scores = grouped.sum(dim=0).mean(dim=0)
-            top_local = torch.topk(scores, k=k, largest=True).indices
-            per_kv.append(torch.sort(visual_positions[top_local]).values)
-        layer_positions.append(torch.stack(per_kv, dim=0))
+        grouped = attn.reshape(
+            num_key_value_heads,
+            heads_per_kv,
+            attn.shape[-2],
+            attn.shape[-1],
+        )
+        scores = grouped.sum(dim=(1, 2), dtype=torch.float32)
+        visual_scores = scores.index_select(-1, visual_positions_device)
+        top_local = torch.topk(visual_scores, k=k, dim=-1, largest=True).indices
+        selected = visual_positions_device[top_local]
+        layer_positions.append(torch.sort(selected, dim=-1).values.cpu())
 
     return SparseSelection(
         topk_positions=layer_positions,
@@ -536,6 +546,7 @@ def ar_generate_qwen25vl(
     eos_token_id: int,
     max_new_tokens: int = 256,
     output_attentions: bool = False,
+    profile_prefill: bool = False,
 ) -> GenerateResult:
     """Vanilla greedy decoding with the same two-stage prefill as STD.
 
@@ -546,8 +557,12 @@ def ar_generate_qwen25vl(
 
     torch.cuda.synchronize()
     start = time.time()
+    stage_start = _profile_mark(profile_prefill)
     past_key_values, _, current_length_data = initialize_past_key_values(model)
+    cache_init_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
+    stage_start = _profile_mark(profile_prefill)
     prompt_ids, next_token, _, _ = prefill_prompt(model, inputs, past_key_values, video_token_id, output_attentions)
+    prefill_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
 
     generated: List[int] = []
     torch.cuda.synchronize()
@@ -568,7 +583,14 @@ def ar_generate_qwen25vl(
         [prompt_ids.to(device), torch.tensor([generated], dtype=torch.long, device=device)],
         dim=1,
     )
-    return GenerateResult(out, end - decode_start, end - start, len(generated))
+    return GenerateResult(
+        out,
+        end - decode_start,
+        end - start,
+        len(generated),
+        cache_init_time=cache_init_time,
+        prefill_time=prefill_time,
+    )
 
 
 @torch.inference_mode()
@@ -588,8 +610,9 @@ def std_generate_qwen25vl(
     sparse_attn_mode: str = "gqa_sdpa",
     adaptive_gamma_min: Optional[int] = None,
     adaptive_gamma_mode: str = "accept_len",
-    reuse_dense_prefill: bool = False,
+    reuse_dense_prefill: bool = True,
     copy_sparse_prefill: bool = True,
+    profile_prefill: bool = False,
     verify_attn_backend: str = "default",
     verify_margin_threshold: Optional[float] = None,
     use_compile: bool = False,
@@ -617,6 +640,7 @@ def std_generate_qwen25vl(
     torch.cuda.synchronize()
     start = time.time()
 
+    stage_start = _profile_mark(profile_prefill)
     selection_pkv, _, selection_lengths = initialize_past_key_values(model)
     if reuse_dense_prefill:
         dense_pkv = selection_pkv
@@ -624,13 +648,17 @@ def std_generate_qwen25vl(
     else:
         dense_pkv, _, dense_lengths = initialize_past_key_values(model)
     sparse_pkv, _, sparse_lengths = initialize_past_key_values(model)
+    cache_init_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
 
+    stage_start = _profile_mark(profile_prefill)
     prompt_ids, dense_next, attentions, text_start = prefill_prompt(
         model, inputs, selection_pkv, video_token_id, output_attentions=True
     )
+    selection_prefill_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
     if attentions is None:
         raise RuntimeError("Dense prefill did not return attentions.")
 
+    stage_start = _profile_mark(profile_prefill)
     selection = build_sparse_selection(
         attentions,
         prompt_ids,
@@ -641,17 +669,23 @@ def std_generate_qwen25vl(
         num_key_value_heads=model.config.num_key_value_heads,
     )
     del attentions
+    selection_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
     controller = SparseDraftController(model, selection, sparse_attn_mode=sparse_attn_mode, use_compile=use_compile)
     controller.install()
 
+    dense_prefill_time = 0.0
     if not reuse_dense_prefill:
+        stage_start = _profile_mark(profile_prefill)
         prompt_ids, dense_next, _, _ = prefill_prompt(model, inputs, dense_pkv, video_token_id, output_attentions=False)
+        dense_prefill_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
+    stage_start = _profile_mark(profile_prefill)
     if copy_sparse_prefill:
         sparse_next = dense_next.clone()
         copy_prompt_cache(dense_pkv, sparse_pkv, sparse_lengths, int(prompt_ids.shape[1]))
     else:
         _, sparse_next, _, _ = prefill_prompt(model, inputs, sparse_pkv, video_token_id, output_attentions=False)
     sparse_prompt_len = compact_sparse_prompt_cache(sparse_pkv, sparse_lengths, selection)
+    sparse_cache_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
 
     generated: List[int] = []
     accepted_total = 0
@@ -867,6 +901,12 @@ def std_generate_qwen25vl(
         verify_time=verify_time,
         bonus_time=bonus_time,
         cache_adjust_time=cache_adjust_time,
+        cache_init_time=cache_init_time,
+        prefill_time=selection_prefill_time + dense_prefill_time,
+        selection_prefill_time=selection_prefill_time,
+        selection_time=selection_time,
+        dense_prefill_time=dense_prefill_time,
+        sparse_cache_time=sparse_cache_time,
     )
     return result, selection
 

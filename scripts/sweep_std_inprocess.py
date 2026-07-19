@@ -54,6 +54,12 @@ def main() -> None:
         action="store_true",
         help="Run a separate sparse prompt prefill instead of copying the normal dense prefill cache.",
     )
+    parser.add_argument(
+        "--reuse-dense-prefill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse the attention-selection prefill as the verifier's dense cache (default: enabled).",
+    )
     parser.add_argument("--min-pixels", type=int, default=None)
     parser.add_argument("--max-pixels", type=int, default=None)
     parser.add_argument("--gpu-ids", default="0,1,2,3")
@@ -110,9 +116,11 @@ def main() -> None:
                         explicit_k=explicit_k,
                         verify_mode=args.verify_mode,
                         sparse_attn_mode=args.sparse_attn_mode,
+                        reuse_dense_prefill=args.reuse_dense_prefill,
                         copy_sparse_prefill=not args.no_copy_sparse_prefill,
                     )
                     speedup = ar.decoding_time / std.decoding_time if std.decoding_time else 0.0
+                    inference_speedup = ar.inference_time / std.inference_time if std.inference_time else 0.0
                     token_equal = bench.tokens_equal(
                         bench.generated_suffix(ar.output_ids, prompt_len),
                         bench.generated_suffix(std.output_ids, prompt_len),
@@ -132,6 +140,7 @@ def main() -> None:
                         "verify_mode": args.verify_mode,
                         "sparse_attn_mode": args.sparse_attn_mode,
                         "copy_sparse_prefill": not args.no_copy_sparse_prefill,
+                        "reuse_dense_prefill": args.reuse_dense_prefill,
                         "prompt_style": args.prompt_style,
                         "max_new_tokens": args.max_new_tokens,
                         "token_equal": token_equal,
@@ -142,6 +151,7 @@ def main() -> None:
                         "ar_decoding_time": ar.decoding_time,
                         "std_decoding_time": std.decoding_time,
                         "speedup": speedup,
+                        "inference_speedup": inference_speedup,
                         "accepted_draft_tokens": std.accepted_draft_tokens,
                         "proposed_draft_tokens": std.proposed_draft_tokens,
                         "acceptance_rate": std.acceptance_rate,

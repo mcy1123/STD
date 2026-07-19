@@ -238,6 +238,13 @@ def main() -> None:
         action="store_true",
         help="Run a separate sparse prompt prefill instead of copying the normal dense prefill cache.",
     )
+    parser.add_argument(
+        "--reuse-dense-prefill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse the attention-selection prefill as the verifier's dense cache (default: enabled).",
+    )
+    parser.add_argument("--profile-prefill", action="store_true", help="Synchronize and record STD prefill stage timings.")
     parser.add_argument("--profile-decode", action="store_true", help="Synchronize and record STD decode stage timings.")
     parser.add_argument("--min-pixels", type=int, default=None)
     parser.add_argument("--max-pixels", type=int, default=None)
@@ -260,12 +267,17 @@ def main() -> None:
     print(f"Dataset: {args.dataset}  |  Samples: {len(samples)}  |  Frames: {args.frame_num}")
     print(f"Max tokens: {args.max_new_tokens}  |  Gamma: {args.gamma}  |  K+text: {args.target_k_plus_text}")
     print(f"Sparse attn: {args.sparse_attn_mode}  |  Verify: {args.verify_mode}  |  Prompt: {args.prompt_style}")
+    print(f"Reuse dense prefill: {args.reuse_dense_prefill}  |  Profile prefill: {args.profile_prefill}")
     print(f"Output: {output_path}")
     print(f"{'='*60}\n")
 
     total_ar_time = 0.0
     total_std_time = 0.0
+    total_ar_inference_time = 0.0
+    total_std_inference_time = 0.0
     total_speedups = []
+    total_inference_speedups = []
+    token_matches = 0
 
     with output_path.open("w", encoding="utf-8") as f:
         pbar = tqdm(total=len(samples), desc="STD benchmark", unit="sample",
@@ -294,6 +306,7 @@ def main() -> None:
                 video_token_id=VIDEO_TOKEN_ID,
                 eos_token_id=eos_token_id,
                 max_new_tokens=args.max_new_tokens,
+                profile_prefill=args.profile_prefill,
             )
             ar_dt = time.time() - t_ar
             print(f"done ({ar_dt:.1f}s, {ar.generate_len} tokens)", flush=True)
@@ -313,12 +326,15 @@ def main() -> None:
                 verify_mode=args.verify_mode,
                 profile_decode=args.profile_decode,
                 sparse_attn_mode=args.sparse_attn_mode,
+                reuse_dense_prefill=args.reuse_dense_prefill,
                 copy_sparse_prefill=not args.no_copy_sparse_prefill,
+                profile_prefill=args.profile_prefill,
             )
             std_dt = time.time() - t_std
             print(f"done ({std_dt:.1f}s, {std.generate_len} tokens)", flush=True)
 
             speedup = ar.decoding_time / std.decoding_time if std.decoding_time else 0.0
+            inference_speedup = ar.inference_time / std.inference_time if std.inference_time else 0.0
             token_equal = tokens_equal(
                 generated_suffix(ar.output_ids, prompt_len),
                 generated_suffix(std.output_ids, prompt_len),
@@ -328,7 +344,11 @@ def main() -> None:
 
             total_ar_time += ar.decoding_time
             total_std_time += std.decoding_time
+            total_ar_inference_time += ar.inference_time
+            total_std_inference_time += std.inference_time
             total_speedups.append(speedup)
+            total_inference_speedups.append(inference_speedup)
+            token_matches += int(token_equal)
             avg_speedup = sum(total_speedups) / len(total_speedups)
 
             pbar.set_postfix_str(
@@ -339,6 +359,7 @@ def main() -> None:
             pbar.update(1)
             print(f"         AR={ar.decoding_time:.2f}s  STD={std.decoding_time:.2f}s  "
                   f"speedup={speedup:.2f}x  accept={std.acceptance_rate:.2f}  "
+                  f"inference={inference_speedup:.2f}x  "
                   f"match={'✓' if token_equal else '✗'}  "
                   f"avg_speedup={avg_speedup:.2f}x", flush=True)
 
@@ -355,7 +376,9 @@ def main() -> None:
                 "verify_mode": args.verify_mode,
                 "sparse_attn_mode": args.sparse_attn_mode,
                 "copy_sparse_prefill": not args.no_copy_sparse_prefill,
+                "reuse_dense_prefill": args.reuse_dense_prefill,
                 "profile_decode": args.profile_decode,
+                "profile_prefill": args.profile_prefill,
                 "prompt_style": args.prompt_style,
                 "max_new_tokens": args.max_new_tokens,
                 "token_equal": token_equal,
@@ -366,6 +389,7 @@ def main() -> None:
                 "ar_decoding_time": ar.decoding_time,
                 "std_decoding_time": std.decoding_time,
                 "speedup": speedup,
+                "inference_speedup": inference_speedup,
                 "accepted_draft_tokens": std.accepted_draft_tokens,
                 "proposed_draft_tokens": std.proposed_draft_tokens,
                 "acceptance_rate": std.acceptance_rate,
@@ -375,6 +399,14 @@ def main() -> None:
                 "verify_time": std.verify_time,
                 "bonus_time": std.bonus_time,
                 "cache_adjust_time": std.cache_adjust_time,
+                "ar_cache_init_time": ar.cache_init_time,
+                "ar_prefill_time": ar.prefill_time,
+                "std_cache_init_time": std.cache_init_time,
+                "std_prefill_time": std.prefill_time,
+                "std_selection_prefill_time": std.selection_prefill_time,
+                "std_selection_time": std.selection_time,
+                "std_dense_prefill_time": std.dense_prefill_time,
+                "std_sparse_cache_time": std.sparse_cache_time,
             }
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
@@ -386,7 +418,12 @@ def main() -> None:
         print(f"Total STD decoding: {total_std_time:.1f}s")
         print(f"Overall speedup:     {total_ar_time / total_std_time:.2f}x" if total_std_time > 0 else "")
         print(f"Mean per-sample:     {sum(total_speedups) / len(total_speedups):.2f}x")
-        print(f"Token match:         {sum(1 for s in total_speedups if s > 0)}/{len(total_speedups)}")
+        print(
+            f"Inference speedup:   {total_ar_inference_time / total_std_inference_time:.2f}x"
+            if total_std_inference_time > 0 else ""
+        )
+        print(f"Mean inference:      {sum(total_inference_speedups) / len(total_inference_speedups):.2f}x")
+        print(f"Token match:         {token_matches}/{len(total_speedups)}")
         print(f"{'='*60}")
 
 

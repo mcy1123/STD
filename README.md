@@ -86,6 +86,8 @@ SPECVLM_MAX_CACHE_LEN=163840 conda run -n specvlm python scripts/benchmark_std.p
 | `--verify-mode` | `parallel` (fast) or `sequential` (exact) | parallel |
 | `--sparse-attn-mode` | `gqa_sdpa`, `repeat_sdpa`, or `triton_gqa` | gqa_sdpa |
 | `--prompt-style` | `direct` or `cot` (chain-of-thought) | direct |
+| `--reuse-dense-prefill` | Reuse attention-selection prefill for dense verification | enabled |
+| `--profile-prefill` | Record synchronized cache/prefill/selection stage timings | disabled |
 | `--gpu-ids` | Comma-separated GPU indices | 0,1,2,3 |
 
 ## Environment Variables
@@ -111,8 +113,9 @@ conda run -n specvlm python scripts/summarize_metrics.py --group-by gamma result
 
 ## Current Implementation Notes
 
-- Uses one Qwen2.5-VL model instance with separate KV caches for selection, dense verification, and sparse drafting
+- Uses one Qwen2.5-VL model instance. By default the attention-selection prefill is reused for dense verification, so only dense and sparse KV caches are retained.
 - Dense cache verifies with full attention; sparse draft cache uses top-K visual KV selected from text-to-video attention during prefill
+- Top-K score reduction stays on GPU and only the selected indices are copied to CPU
 - Greedy decoding only — correctness check is exact token equality with vanilla AR
 - `--verify-mode parallel` matches the paper-style parallel dense verification
 - `--verify-attn-backend math` forces the math SDPA backend for stricter lossless verification

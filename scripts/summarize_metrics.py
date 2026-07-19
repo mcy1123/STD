@@ -51,6 +51,10 @@ def print_summary(label: str, records: Iterable[dict]) -> None:
     print(f"  samples: {len(records)}")
     print(f"  token_equal: {exact}/{len(records)} ({exact / len(records):.3f})")
     print(f"  speedup: {mean([r['speedup'] for r in records]):.3f}x")
+    total_ar_decode = sum(float(r["ar_decoding_time"]) for r in records)
+    total_std_decode = sum(float(r["std_decoding_time"]) for r in records)
+    if total_std_decode:
+        print(f"  overall_decode_speedup: {total_ar_decode / total_std_decode:.3f}x")
     print(f"  acceptance_rate: {mean([r['acceptance_rate'] for r in records]):.3f}")
     print(f"  mean_accept_length: {mean([r['mean_accept_length'] for r in records]):.3f}")
     if any(r.get("gamma_history") for r in records):
@@ -71,8 +75,31 @@ def print_summary(label: str, records: Iterable[dict]) -> None:
     if all("ar_inference_time" in r and "std_inference_time" in r for r in records):
         print(f"  ar_inference_time: {mean([r['ar_inference_time'] for r in records]):.3f}s")
         print(f"  std_inference_time: {mean([r['std_inference_time'] for r in records]):.3f}s")
+        total_ar_inference = sum(float(r["ar_inference_time"]) for r in records)
+        total_std_inference = sum(float(r["std_inference_time"]) for r in records)
+        if total_std_inference:
+            print(f"  overall_inference_speedup: {total_ar_inference / total_std_inference:.3f}x")
+        if all("inference_speedup" in r for r in records):
+            print(f"  mean_inference_speedup: {mean([r['inference_speedup'] for r in records]):.3f}x")
+    prefill_fields = [
+        "ar_cache_init_time",
+        "ar_prefill_time",
+        "std_cache_init_time",
+        "std_selection_prefill_time",
+        "std_selection_time",
+        "std_dense_prefill_time",
+        "std_sparse_cache_time",
+    ]
+    if any(r.get("profile_prefill") for r in records) and all(
+        all(field in r for field in prefill_fields) for r in records
+    ):
+        print("  prefill profile:")
+        for field in prefill_fields:
+            print(f"    {field}: {mean([float(r[field]) for r in records]):.3f}s")
     stage_fields = ["draft_time", "verify_time", "bonus_time", "cache_adjust_time"]
-    if all(all(field in r for field in stage_fields) for r in records):
+    if any(r.get("profile_decode") for r in records) and all(
+        all(field in r for field in stage_fields) for r in records
+    ):
         stage_total = mean([sum(float(r[field]) for field in stage_fields) for r in records])
         for field in stage_fields:
             field_mean = mean([float(r[field]) for r in records])
