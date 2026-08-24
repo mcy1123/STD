@@ -7,7 +7,7 @@ invoke any decoder, model, cache, or runtime routing implementation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -133,3 +133,280 @@ def budget_series(
                 next_k = bounds.clamp(max(attention_k, feedback_k))
         budgets[round_id] = next_k
     return budgets, fallbacks
+
+
+def reconstruct_proposed(query_lens: Sequence[int]) -> List[int]:
+    """Recover draft lengths from verification query lengths."""
+
+    proposed: List[int] = []
+    for round_id, query_len in enumerate(query_lens):
+        value = int(query_len) if round_id == 0 else int(query_len) - 1
+        if value <= 0:
+            raise ValueError("query lengths imply a non-positive proposed length")
+        proposed.append(value)
+    return proposed
+
+
+@dataclass
+class SampleTrace:
+    sample_id: str
+    dataset: str
+    visual_len: int
+    recorded_k: int
+    gamma: int
+    prefill_scores: np.ndarray
+    round_scores: np.ndarray
+    accepted: np.ndarray
+    proposed: np.ndarray
+
+    def __post_init__(self) -> None:
+        self.prefill_scores = np.asarray(self.prefill_scores, dtype=np.float64)
+        self.round_scores = np.asarray(self.round_scores, dtype=np.float64)
+        self.accepted = np.asarray(self.accepted, dtype=np.float64)
+        self.proposed = np.asarray(self.proposed, dtype=np.int64)
+        if not self.sample_id:
+            raise ValueError("sample_id must not be empty")
+        if self.visual_len <= 0 or self.gamma <= 0 or self.recorded_k <= 0:
+            raise ValueError("visual_len, recorded_k, and gamma must be positive")
+        if self.prefill_scores.shape != (self.visual_len,):
+            raise ValueError("prefill score width must equal visual_len")
+        if self.round_scores.ndim != 2 or self.round_scores.shape[1] != self.visual_len:
+            raise ValueError("round score width must equal visual_len")
+        round_count = self.round_scores.shape[0]
+        if self.accepted.shape != (round_count,) or self.proposed.shape != (round_count,):
+            raise ValueError("round count mismatch in SampleTrace")
+        if np.any(self.proposed <= 0):
+            raise ValueError("proposed lengths must be positive")
+        if np.any(self.accepted < 0) or np.any(self.accepted > self.proposed):
+            raise ValueError("accepted lengths must be between zero and proposed")
+
+
+@dataclass(frozen=True)
+class StrategySpec:
+    name: str
+    kind: str
+    static_k: Optional[int] = None
+    rho: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"static", "attention", "acceptance", "hybrid"}:
+            raise ValueError(f"unsupported strategy kind: {self.kind}")
+        if self.kind == "static" and (self.static_k is None or self.static_k <= 0):
+            raise ValueError("static strategies require positive static_k")
+        if self.kind in {"attention", "hybrid"} and self.rho is None:
+            raise ValueError("attention-based strategies require rho")
+
+
+@dataclass
+class RoundResult:
+    sample_id: str
+    dataset: str
+    strategy: str
+    kind: str
+    round_id: int
+    k: int
+    accepted_observed: float
+    proposed: int
+    recorded_coverage: float
+    candidate_coverage: float
+    proxy_accept: float
+    controller_fallbacks: int = 0
+
+    @classmethod
+    def minimal(
+        cls,
+        sample_id: str,
+        strategy: str,
+        round_id: int,
+        k: int,
+        accepted: float,
+        proposed: int,
+    ) -> "RoundResult":
+        return cls(
+            sample_id=sample_id,
+            dataset="fixture",
+            strategy=strategy,
+            kind="static",
+            round_id=round_id,
+            k=k,
+            accepted_observed=accepted,
+            proposed=proposed,
+            recorded_coverage=1.0,
+            candidate_coverage=1.0,
+            proxy_accept=accepted,
+        )
+
+
+@dataclass
+class StrategySummary:
+    strategy: str
+    kind: str
+    evidence: str
+    rounds: int
+    mean_k: float
+    median_k: float
+    min_k: int
+    max_k: int
+    coefficient_of_variation: float
+    iqr_k: float
+    change_fraction: float
+    observed_mean_accept: float
+    observed_accept_rate: float
+    proxy_mean_accept: float
+    proxy_accept_rate: float
+    observed_efficiency: float
+    proxy_efficiency: float
+    controller_fallbacks: int
+
+
+def default_strategies() -> List[StrategySpec]:
+    strategies = [
+        StrategySpec(name=f"static_k{k}", kind="static", static_k=k)
+        for k in (1024, 2048, 4096, 8192)
+    ]
+    strategies.extend(
+        StrategySpec(name=f"attention_rho{rho:.2f}", kind="attention", rho=rho)
+        for rho in (0.8, 0.9, 0.95)
+    )
+    strategies.append(StrategySpec(name="acceptance_feedback", kind="acceptance"))
+    strategies.extend(
+        StrategySpec(name=f"hybrid_rho{rho:.2f}", kind="hybrid", rho=rho)
+        for rho in (0.8, 0.9, 0.95)
+    )
+    return strategies
+
+
+def _ranking(scores: np.ndarray) -> np.ndarray:
+    values = np.asarray(scores, dtype=np.float64)
+    safe = np.where(np.isfinite(values), np.clip(values, 0.0, None), 0.0)
+    return np.argsort(-safe, kind="stable")
+
+
+def _coverage(scores: np.ndarray, ranking: np.ndarray, k: int) -> float:
+    values = np.asarray(scores, dtype=np.float64)
+    safe = np.where(np.isfinite(values), np.clip(values, 0.0, None), 0.0)
+    total = float(safe.sum())
+    if total <= 0.0:
+        return 0.0
+    return float(safe[ranking[: int(k)]].sum() / total)
+
+
+def replay_strategy(
+    trace: SampleTrace,
+    spec: StrategySpec,
+    bounds: BudgetBounds,
+) -> Tuple[List[RoundResult], StrategySummary]:
+    """Replay one strategy over one recorded sample."""
+
+    if trace.visual_len != bounds.visual_len:
+        raise ValueError("trace visual_len does not match bounds")
+    round_count = trace.round_scores.shape[0]
+    if spec.kind == "static":
+        budgets = np.full(round_count, bounds.clamp(int(spec.static_k)), dtype=np.int64)
+        controller_fallbacks = 0
+    else:
+        budgets, controller_fallbacks = budget_series(
+            trace.prefill_scores,
+            trace.round_scores,
+            trace.accepted,
+            trace.proposed,
+            trace.recorded_k,
+            spec.kind,
+            spec.rho,
+            bounds,
+        )
+
+    prefill_ranking = _ranking(trace.prefill_scores)
+    recorded_k = min(trace.recorded_k, trace.visual_len)
+    rows: List[RoundResult] = []
+    zero_denominator_fallbacks = 0
+    for round_id in range(round_count):
+        current_scores = trace.round_scores[round_id]
+        recorded_coverage = _coverage(current_scores, prefill_ranking, recorded_k)
+        if spec.kind == "static" or round_id == 0:
+            candidate_ranking = prefill_ranking
+        else:
+            candidate_ranking = _ranking(trace.round_scores[round_id - 1])
+        candidate_coverage = _coverage(current_scores, candidate_ranking, int(budgets[round_id]))
+        if recorded_coverage <= 0.0:
+            proxy_accept = float(trace.accepted[round_id])
+            zero_denominator_fallbacks += 1
+        else:
+            proxy_accept = float(
+                np.clip(
+                    trace.accepted[round_id] * candidate_coverage / recorded_coverage,
+                    0.0,
+                    trace.proposed[round_id],
+                )
+            )
+        rows.append(
+            RoundResult(
+                sample_id=trace.sample_id,
+                dataset=trace.dataset,
+                strategy=spec.name,
+                kind=spec.kind,
+                round_id=round_id,
+                k=int(budgets[round_id]),
+                accepted_observed=float(trace.accepted[round_id]),
+                proposed=int(trace.proposed[round_id]),
+                recorded_coverage=recorded_coverage,
+                candidate_coverage=candidate_coverage,
+                proxy_accept=proxy_accept,
+                controller_fallbacks=(controller_fallbacks + zero_denominator_fallbacks)
+                if round_id == round_count - 1
+                else 0,
+            )
+        )
+    return rows, _summarize(spec, rows)
+
+
+def _summarize(spec: StrategySpec, rows: Sequence[RoundResult]) -> StrategySummary:
+    if not rows:
+        raise ValueError("cannot summarize an empty strategy")
+    k_values = np.asarray([row.k for row in rows], dtype=np.float64)
+    observed = np.asarray([row.accepted_observed for row in rows], dtype=np.float64)
+    proxy = np.asarray([row.proxy_accept for row in rows], dtype=np.float64)
+    proposed = np.asarray([row.proposed for row in rows], dtype=np.float64)
+    transitions = 0
+    changes = 0
+    grouped: Dict[str, List[RoundResult]] = {}
+    for row in rows:
+        grouped.setdefault(row.sample_id, []).append(row)
+    for sample_rows in grouped.values():
+        ordered = sorted(sample_rows, key=lambda row: row.round_id)
+        transitions += max(0, len(ordered) - 1)
+        changes += sum(left.k != right.k for left, right in zip(ordered, ordered[1:]))
+    mean_k = float(k_values.mean())
+    budget_units = float(k_values.sum() / 1024.0)
+    return StrategySummary(
+        strategy=spec.name,
+        kind=spec.kind,
+        evidence="proxy",
+        rounds=len(rows),
+        mean_k=mean_k,
+        median_k=float(np.median(k_values)),
+        min_k=int(k_values.min()),
+        max_k=int(k_values.max()),
+        coefficient_of_variation=float(k_values.std() / mean_k) if mean_k else 0.0,
+        iqr_k=float(np.percentile(k_values, 75) - np.percentile(k_values, 25)),
+        change_fraction=float(changes / transitions) if transitions else 0.0,
+        observed_mean_accept=float(observed.mean()),
+        observed_accept_rate=float(observed.sum() / proposed.sum()),
+        proxy_mean_accept=float(proxy.mean()),
+        proxy_accept_rate=float(proxy.sum() / proposed.sum()),
+        observed_efficiency=float(observed.sum() / budget_units),
+        proxy_efficiency=float(proxy.sum() / budget_units),
+        controller_fallbacks=sum(row.controller_fallbacks for row in rows),
+    )
+
+
+def aggregate_summaries(
+    round_rows: Sequence[RoundResult], specs: Sequence[StrategySpec]
+) -> List[StrategySummary]:
+    """Aggregate per-round rows across samples without boundary transitions."""
+
+    summaries: List[StrategySummary] = []
+    for spec in specs:
+        selected = [row for row in round_rows if row.strategy == spec.name]
+        summaries.append(_summarize(spec, selected))
+    return summaries

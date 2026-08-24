@@ -5,9 +5,16 @@ import pytest
 
 from std_repro.adaptive_k_offline import (
     BudgetBounds,
+    RoundResult,
+    SampleTrace,
+    StrategySpec,
     acceptance_feedback,
+    aggregate_summaries,
     attention_mass_top_p,
     budget_series,
+    default_strategies,
+    reconstruct_proposed,
+    replay_strategy,
 )
 
 
@@ -136,4 +143,105 @@ def test_budget_series_rejects_inconsistent_rounds() -> None:
             controller="acceptance",
             rho=None,
             bounds=bounds,
+        )
+
+
+def _sample_trace(sample_id: str = "sample-1") -> SampleTrace:
+    return SampleTrace(
+        sample_id=sample_id,
+        dataset="VideoDetailCaption",
+        visual_len=4,
+        recorded_k=2,
+        gamma=2,
+        prefill_scores=np.array([0.6, 0.3, 0.1, 0.0]),
+        round_scores=np.array(
+            [
+                [0.1, 0.1, 0.2, 0.6],
+                [0.5, 0.3, 0.1, 0.1],
+            ]
+        ),
+        accepted=np.array([1.0, 1.0]),
+        proposed=np.array([2, 2]),
+    )
+
+
+def test_reconstruct_proposed_accounts_for_pending_token_after_round_zero() -> None:
+    assert reconstruct_proposed([2, 3]) == [2, 2]
+
+
+def test_recorded_static_replay_anchors_proxy_to_observed_acceptance() -> None:
+    trace = _sample_trace()
+    spec = StrategySpec(name="recorded", kind="static", static_k=2)
+
+    rows, summary = replay_strategy(
+        trace, spec, BudgetBounds(k_min=1, k_max=4, visual_len=4)
+    )
+
+    assert [row.proxy_accept for row in rows] == pytest.approx([1.0, 1.0])
+    assert summary.observed_mean_accept == pytest.approx(1.0)
+    assert summary.observed_accept_rate == pytest.approx(0.5)
+    assert summary.proxy_mean_accept == pytest.approx(1.0)
+    assert summary.observed_efficiency == pytest.approx(2.0 / (4.0 / 1024.0))
+
+
+def test_static_and_adaptive_selectors_use_different_causal_rankings() -> None:
+    trace = _sample_trace()
+    bounds = BudgetBounds(k_min=1, k_max=4, visual_len=4)
+
+    static_rows, _ = replay_strategy(
+        trace, StrategySpec(name="static", kind="static", static_k=2), bounds
+    )
+    adaptive_rows, _ = replay_strategy(
+        trace, StrategySpec(name="adaptive", kind="attention", rho=0.8), bounds
+    )
+
+    assert static_rows[1].candidate_coverage == pytest.approx(0.8)
+    assert adaptive_rows[1].candidate_coverage == pytest.approx(0.2)
+    assert adaptive_rows[1].proxy_accept == pytest.approx(0.25)
+
+
+def test_proxy_acceptance_is_clipped_to_proposed_length() -> None:
+    trace = _sample_trace()
+    trace.accepted[:] = 2.0
+    spec = StrategySpec(name="large", kind="static", static_k=4)
+
+    rows, _ = replay_strategy(trace, spec, BudgetBounds(k_min=1, k_max=4, visual_len=4))
+
+    assert [row.proxy_accept for row in rows] == [2.0, 2.0]
+
+
+def test_aggregate_summaries_excludes_sample_boundaries_from_change_fraction() -> None:
+    rows = [
+        RoundResult.minimal("a", "s", 0, k=1, accepted=1.0, proposed=2),
+        RoundResult.minimal("a", "s", 1, k=2, accepted=1.0, proposed=2),
+        RoundResult.minimal("b", "s", 0, k=8, accepted=1.0, proposed=2),
+        RoundResult.minimal("b", "s", 1, k=8, accepted=1.0, proposed=2),
+    ]
+
+    summary = aggregate_summaries(rows, [StrategySpec(name="s", kind="static", static_k=1)])[0]
+
+    assert summary.mean_k == pytest.approx(4.75)
+    assert summary.min_k == 1
+    assert summary.max_k == 8
+    assert summary.change_fraction == pytest.approx(0.5)
+
+
+def test_default_strategies_have_requested_static_and_adaptive_rows() -> None:
+    strategies = default_strategies()
+
+    assert [s.static_k for s in strategies if s.kind == "static"] == [1024, 2048, 4096, 8192]
+    assert [s.rho for s in strategies if s.kind == "attention"] == [0.8, 0.9, 0.95]
+    assert len([s for s in strategies if s.kind == "acceptance"]) == 1
+    assert [s.rho for s in strategies if s.kind == "hybrid"] == [0.8, 0.9, 0.95]
+
+
+def test_sample_trace_rejects_invalid_acceptance() -> None:
+    trace = _sample_trace()
+
+    with pytest.raises(ValueError, match="accepted"):
+        SampleTrace(
+            **{
+                **trace.__dict__,
+                "accepted": np.array([3.0, 1.0]),
+            }
         )
