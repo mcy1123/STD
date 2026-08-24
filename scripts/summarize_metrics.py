@@ -5,12 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from pathlib import Path
 from typing import Iterable, Sequence
 
 
 def mean(values):
     return sum(values) / len(values) if values else 0.0
+
+
+def print_distribution(label: str, values) -> None:
+    values = [float(value) for value in values]
+    if not values:
+        return
+    std = statistics.pstdev(values) if len(values) > 1 else 0.0
+    print(f"  {label}: mean={mean(values):.3f} median={statistics.median(values):.3f} std={std:.3f}")
 
 
 def mean_list_field(records: Sequence[dict], field: str) -> float:
@@ -51,6 +60,7 @@ def print_summary(label: str, records: Iterable[dict]) -> None:
     print(f"  samples: {len(records)}")
     print(f"  token_equal: {exact}/{len(records)} ({exact / len(records):.3f})")
     print(f"  speedup: {mean([r['speedup'] for r in records]):.3f}x")
+    print_distribution("speedup_distribution", [r["speedup"] for r in records])
     total_ar_decode = sum(float(r["ar_decoding_time"]) for r in records)
     total_std_decode = sum(float(r["std_decoding_time"]) for r in records)
     if total_std_decode:
@@ -69,6 +79,30 @@ def print_summary(label: str, records: Iterable[dict]) -> None:
     )
     print(f"  ar_decoding_time: {mean([r['ar_decoding_time'] for r in records]):.3f}s")
     print(f"  std_decoding_time: {mean([r['std_decoding_time'] for r in records]):.3f}s")
+    input_time_fields = [
+        "video_probe_time",
+        "video_decode_sampling_time",
+        "processor_time",
+        "input_cache_load_time",
+        "input_cache_save_time",
+        "input_transfer_time",
+        "input_preparation_time",
+    ]
+    if all(all(field in r for field in input_time_fields) for r in records):
+        print("  input preparation:")
+        for field in input_time_fields:
+            print(f"    {field}: {mean([float(r[field]) for r in records]):.3f}s")
+        cache_hits = sum(bool(r.get("input_cache_hit")) for r in records)
+        print(f"    cache_hits: {cache_hits}/{len(records)}")
+        decoded_counts = [r["decoded_frame_count"] for r in records if r.get("decoded_frame_count") is not None]
+        if decoded_counts:
+            print_distribution("decoded_frame_count", decoded_counts)
+    if all("ar_tokens_per_second" in r and "std_tokens_per_second" in r for r in records):
+        print_distribution("ar_tokens_per_second", [r["ar_tokens_per_second"] for r in records])
+        print_distribution("std_tokens_per_second", [r["std_tokens_per_second"] for r in records])
+    if all("ar_peak_memory_gib" in r and "std_peak_memory_gib" in r for r in records):
+        print(f"  ar_peak_memory_gib: {mean([r['ar_peak_memory_gib'] for r in records]):.3f}")
+        print(f"  std_peak_memory_gib: {mean([r['std_peak_memory_gib'] for r in records]):.3f}")
     if any("verify_margin_reruns" in r for r in records):
         print(f"  verify_margin_reruns: {mean([float(r.get('verify_margin_reruns', 0)) for r in records]):.3f}")
         print(f"  min_verify_margin: {min(float(r.get('min_verify_margin', 0.0)) for r in records):.6f}")
@@ -96,6 +130,21 @@ def print_summary(label: str, records: Iterable[dict]) -> None:
         print("  prefill profile:")
         for field in prefill_fields:
             print(f"    {field}: {mean([float(r[field]) for r in records]):.3f}s")
+        module_fields = [
+            "ar_vision_encoder_time",
+            "ar_projector_time",
+            "ar_dense_lm_prefill_time",
+            "std_vision_encoder_time",
+            "std_projector_time",
+            "std_dense_lm_prefill_time",
+            "ar_vision_encoder_forward_count",
+            "ar_projector_forward_count",
+            "std_vision_encoder_forward_count",
+            "std_projector_forward_count",
+        ]
+        if all(all(field in r for field in module_fields) for r in records):
+            for field in module_fields:
+                print(f"    {field}: {mean([float(r[field]) for r in records]):.3f}")
     stage_fields = ["draft_time", "verify_time", "bonus_time", "cache_adjust_time"]
     if any(r.get("profile_decode") for r in records) and all(
         all(field in r for field in stage_fields) for r in records

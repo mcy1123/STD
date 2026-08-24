@@ -1060,6 +1060,12 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         # Reset past_key_value to avoid return past_key_value.
         past_key_value = None
 
+        # [STD-ANALYSIS] Read-only attention-trace hook (no numerical side
+        # effects; the attribute is absent during baseline runs).
+        _trace_hook = getattr(self, "_std_trace_hook", None)
+        if _trace_hook is not None:
+            _trace_hook(self.layer_idx, query_states, key_states)
+
         # [STD] Sparse KV selection: when sparse_kv_selection is set, gather only
         # top-K visual keys/values per head + all text/generated keys/values.
         if hasattr(self, 'sparse_kv_selection') and self.sparse_kv_selection is not None:

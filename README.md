@@ -105,6 +105,30 @@ conda run -n specvlm python scripts/summarize_metrics.py results/std_qwen2_5_vl_
 conda run -n specvlm python scripts/summarize_metrics.py --group-by gamma results/std_qwen2_5_vl_7b/sweep.jsonl
 ```
 
+## H100 staged evaluation
+
+The staged runner uses fixed-token performance mode, processor-output caching,
+dense-prefill reuse, and machine-readable summaries. Run phases in order:
+
+```bash
+bash scripts/run_h100_next_stage.sh baseline
+bash scripts/run_h100_next_stage.sh prefill
+bash scripts/run_h100_next_stage.sh k
+BEST_K_PLUS_TEXT=4096 bash scripts/run_h100_next_stage.sh gamma
+BEST_K_PLUS_TEXT=4096 BEST_GAMMA=9 bash scripts/run_h100_next_stage.sh context
+```
+
+`correctness` intentionally uses normal EOS stopping and writes basic first-
+divergence diagnostics separately from performance results:
+
+```bash
+bash scripts/run_h100_next_stage.sh correctness
+```
+
+Override `EVAL_NUM`, `MAX_NEW_TOKENS`, `MAX_PIXELS`, `RESULT_DIR`, or
+`INPUT_CACHE_DIR` through environment variables. Cached processor outputs can
+consume substantial disk space for 256-frame videos.
+
 ## H100 / A100 GPU Notes
 
 - A100/H100 80GB can run 256+ frames on a **single GPU** (RTX 3090 is limited to ~144 frames across 4 GPUs)

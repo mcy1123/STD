@@ -45,7 +45,6 @@ conda run --no-capture-output -n "$CONDA_ENV" \
   --prompt-style cot \
   --verify-mode parallel \
   --sparse-attn-mode gqa_sdpa \
-  --reuse-dense-prefill \
   "${PROFILE_ARGS[@]}" \
   --gpu-ids "$GPU_IDS" \
   --output "$OUTPUT"

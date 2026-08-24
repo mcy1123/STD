@@ -23,6 +23,17 @@ from specvlm.utils.utils import get_last_video_idx
 from std_repro.triton_attention import fused_gqa_attention
 
 
+# [STD-ANALYSIS] Optional read-only attention-trace collector. None during
+# baseline runs; the analysis collector installs itself to capture per-round
+# dense-verification visual attention without altering logits/KV/correctness.
+_TRACE_COLLECTOR = None
+
+
+def set_trace_collector(collector) -> None:
+    global _TRACE_COLLECTOR
+    _TRACE_COLLECTOR = collector
+
+
 @dataclass
 class SparseSelection:
     """Per-layer sparse visual KV choices."""
@@ -121,6 +132,31 @@ def _min_prediction_margin(
     return float((top2[:, 0] - top2[:, 1]).min().item())
 
 
+def _split_video_text_inputs(
+    inputs: Dict[str, torch.Tensor],
+    video_token_id: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, int, torch.Tensor, Dict[str, torch.Tensor]]:
+    """Split inputs into the canonical video-prefix and text-suffix segments.
+
+    The underlying tensors are never mutated, so `video_inputs` and
+    `text_input_ids` share storage with `inputs` and can be reused across the
+    selection and dense branches without extra device-to-device copies.
+    """
+    local_inputs = _move_inputs(inputs, device)
+    input_ids = local_inputs["input_ids"]
+    last_video_idx = get_last_video_idx(input_ids[0], video_token_id)
+    if last_video_idx is None or last_video_idx < 0:
+        raise ValueError("No video token found in the prompt; STD visual KV selection requires video input.")
+    text_start = last_video_idx + 1
+    text_input_ids = input_ids[:, text_start:].clone()
+    video_inputs = dict(local_inputs)
+    video_inputs["input_ids"] = input_ids[:, :text_start]
+    if "attention_mask" in video_inputs:
+        video_inputs["attention_mask"] = video_inputs["attention_mask"][:, :text_start]
+    return input_ids, text_start, text_input_ids, video_inputs
+
+
 def prefill_prompt(
     model,
     inputs: Dict[str, torch.Tensor],
@@ -131,21 +167,7 @@ def prefill_prompt(
     """Prefill video-prefix then text suffix, matching SpecVLM's Qwen path."""
 
     device = _first_model_device(model)
-    # _move_inputs() creates a new dictionary. The tensors themselves are never
-    # mutated, so cloning the full video tensor here only adds a large device-to-
-    # device copy for every prefill.
-    local_inputs = _move_inputs(inputs, device)
-
-    input_ids = local_inputs["input_ids"]
-    last_video_idx = get_last_video_idx(input_ids[0], video_token_id)
-    if last_video_idx is None or last_video_idx < 0:
-        raise ValueError("No video token found in the prompt; STD visual KV selection requires video input.")
-
-    text_input_ids = input_ids[:, last_video_idx + 1 :].clone()
-    video_inputs = dict(local_inputs)
-    video_inputs["input_ids"] = input_ids[:, : last_video_idx + 1]
-    if "attention_mask" in video_inputs:
-        video_inputs["attention_mask"] = video_inputs["attention_mask"][:, : last_video_idx + 1]
+    input_ids, text_start, text_input_ids, video_inputs = _split_video_text_inputs(inputs, video_token_id, device)
 
     model(**video_inputs, past_key_values=past_key_values)
 
@@ -157,7 +179,7 @@ def prefill_prompt(
 
     output = model(**text_kwargs)
     next_token = _token_argmax(output.logits)
-    return input_ids.clone(), next_token, output.attentions if output_attentions else None, last_video_idx + 1
+    return input_ids.clone(), next_token, output.attentions if output_attentions else None, text_start
 
 
 def build_sparse_selection(
@@ -547,6 +569,7 @@ def ar_generate_qwen25vl(
     max_new_tokens: int = 256,
     output_attentions: bool = False,
     profile_prefill: bool = False,
+    ignore_eos: bool = False,
 ) -> GenerateResult:
     """Vanilla greedy decoding with the same two-stage prefill as STD.
 
@@ -571,7 +594,7 @@ def ar_generate_qwen25vl(
     while len(generated) < max_new_tokens:
         token_id = int(next_token.item())
         generated.append(token_id)
-        if token_id == eos_token_id:
+        if token_id == eos_token_id and not ignore_eos:
             break
         outputs = model(input_ids=next_token.to(device), past_key_values=past_key_values)
         next_token = _token_argmax(outputs.logits)
@@ -610,12 +633,12 @@ def std_generate_qwen25vl(
     sparse_attn_mode: str = "gqa_sdpa",
     adaptive_gamma_min: Optional[int] = None,
     adaptive_gamma_mode: str = "accept_len",
-    reuse_dense_prefill: bool = True,
     copy_sparse_prefill: bool = True,
     profile_prefill: bool = False,
     verify_attn_backend: str = "default",
     verify_margin_threshold: Optional[float] = None,
     use_compile: bool = False,
+    ignore_eos: bool = False,
 ) -> Tuple[GenerateResult, SparseSelection]:
     """Sparse-to-Dense greedy decoding."""
 
@@ -641,22 +664,51 @@ def std_generate_qwen25vl(
     start = time.time()
 
     stage_start = _profile_mark(profile_prefill)
-    selection_pkv, _, selection_lengths = initialize_past_key_values(model)
-    if reuse_dense_prefill:
-        dense_pkv = selection_pkv
-        dense_lengths = selection_lengths
-    else:
-        dense_pkv, _, dense_lengths = initialize_past_key_values(model)
-    sparse_pkv, _, sparse_lengths = initialize_past_key_values(model)
+    selection_pkv, _, _ = initialize_past_key_values(model)
     cache_init_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
 
     stage_start = _profile_mark(profile_prefill)
-    prompt_ids, dense_next, attentions, text_start = prefill_prompt(
-        model, inputs, selection_pkv, video_token_id, output_attentions=True
+    input_ids, text_start, text_input_ids, video_inputs = _split_video_text_inputs(
+        inputs, video_token_id, _first_model_device(model)
     )
+    prompt_ids = input_ids.clone()
+
+    # 1. Canonical video-prefix prefill (output_attentions defaults to False),
+    #    shared by both the selection and dense branches.
+    model(**video_inputs, past_key_values=selection_pkv)
+    # Scheme B (correctness invariant): the dense verifier cache is always a
+    # separate canonical cache, allocated only after the video-prefix prefill so
+    # prefill runs with a single cache. The selection branch KV (custom attention,
+    # output_attentions=True) must NEVER enter the dense verifier; only the shared
+    # canonical video-prefix KV is copied in.
+    dense_pkv, _, dense_lengths = initialize_past_key_values(model)
+    # 2. Clone the canonical video-prefix KV into the dense verifier cache so
+    #    both branches share the exact same prefix before diverging.
+    copy_prompt_cache(selection_pkv, dense_pkv, dense_lengths, text_start)
+    # 3. Selection branch: text suffix with output_attentions=True. Its KV stays
+    #    in selection_pkv and is used only to derive the visual top-K selection.
+    selection_output = model(input_ids=text_input_ids, past_key_values=selection_pkv, output_attentions=True)
+    attentions = selection_output.attentions
+    # 4. Dense branch: text suffix with output_attentions=False, producing the
+    #    canonical dense verifier KV and the canonical next token.
+    _trace = _TRACE_COLLECTOR
+    if _trace is not None:
+        _trace.begin_prefill()
+    dense_output = model(input_ids=text_input_ids, past_key_values=dense_pkv, output_attentions=False)
+    if _trace is not None:
+        _trace.end_prefill()
+    # Invariant guard: the canonical dense branch must not request attentions,
+    # otherwise it would run the custom (BF16 QK) attention path and contaminate
+    # the verifier cache with non-canonical KV.
+    if dense_output.attentions is not None:
+        raise RuntimeError(
+            "Correctness invariant violated: dense verifier prefill returned "
+            "attentions (non-canonical attention path)."
+        )
+    dense_next = _token_argmax(dense_output.logits)
     selection_prefill_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
     if attentions is None:
-        raise RuntimeError("Dense prefill did not return attentions.")
+        raise RuntimeError("Selection prefill did not return attentions.")
 
     stage_start = _profile_mark(profile_prefill)
     selection = build_sparse_selection(
@@ -672,13 +724,15 @@ def std_generate_qwen25vl(
     selection_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
     controller = SparseDraftController(model, selection, sparse_attn_mode=sparse_attn_mode, use_compile=use_compile)
     controller.install()
+    # Release the selection cache now that its video/text KV has been copied into
+    # the dense verifier and the visual top-K selection has been extracted from
+    # attentions; it is no longer referenced. This frees ~2.2 GiB before the
+    # sparse cache is allocated below.
+    del selection_pkv
 
     dense_prefill_time = 0.0
-    if not reuse_dense_prefill:
-        stage_start = _profile_mark(profile_prefill)
-        prompt_ids, dense_next, _, _ = prefill_prompt(model, inputs, dense_pkv, video_token_id, output_attentions=False)
-        dense_prefill_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
     stage_start = _profile_mark(profile_prefill)
+    sparse_pkv, _, sparse_lengths = initialize_past_key_values(model)
     if copy_sparse_prefill:
         sparse_next = dense_next.clone()
         copy_prompt_cache(dense_pkv, sparse_pkv, sparse_lengths, int(prompt_ids.shape[1]))
@@ -736,8 +790,13 @@ def std_generate_qwen25vl(
         if verify_mode == "parallel":
             verify_input = dense_pending + draft
             verify_tensor = torch.tensor([verify_input], dtype=torch.long, device=device)
+            _trace = _TRACE_COLLECTOR
+            if _trace is not None:
+                _trace.begin_verification(decode_rounds)
             with _sdpa_backend_context(verify_attn_backend):
                 verify_outputs = model(input_ids=verify_tensor, past_key_values=dense_pkv)
+            if _trace is not None:
+                _trace.end_verification()
             verify_argmax = torch.argmax(verify_outputs.logits[0], dim=-1).tolist()
             if dense_pending:
                 dense_predictions = [int(x) for x in verify_argmax]
@@ -842,7 +901,7 @@ def std_generate_qwen25vl(
                 current_gamma = min(gamma, current_gamma + 1)
 
         full_append = draft[:accept_len] + [bonus_token]
-        eos_index = _contains_eos(full_append, eos_token_id)
+        eos_index = None if ignore_eos else _contains_eos(full_append, eos_token_id)
         if eos_index is not None:
             full_append = full_append[: eos_index + 1]
 
@@ -850,7 +909,7 @@ def std_generate_qwen25vl(
         generated.extend(int(x) for x in to_append)
 
         reached_limit = len(generated) >= max_new_tokens
-        reached_eos = bool(to_append and to_append[-1] == eos_token_id)
+        reached_eos = bool(not ignore_eos and to_append and to_append[-1] == eos_token_id)
         if reached_limit or reached_eos:
             break
 
