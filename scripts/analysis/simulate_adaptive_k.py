@@ -223,7 +223,7 @@ def plot_budget_by_round(rows: Sequence[RoundResult], path: Path) -> None:
         means = np.asarray([np.mean(by_round[x]) for x in xs])
         stds = np.asarray([np.std(by_round[x]) for x in xs])
         ax.plot(xs, means, linewidth=1.4, label=strategy)
-        ax.fill_between(xs, means - stds, means + stds, alpha=0.08)
+        ax.fill_between(xs, np.maximum(means - stds, 0.0), means + stds, alpha=0.08)
     ax.set_title("Figure 1: Adaptive visual KV budget by verification round")
     ax.set_xlabel("Verification round ID")
     ax.set_ylabel("Visual K")
@@ -232,6 +232,21 @@ def plot_budget_by_round(rows: Sequence[RoundResult], path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
+
+
+def frontier_annotation_style(strategy: str) -> tuple:
+    """Return a compact label and collision-aware offset for frontier points."""
+
+    styles = {
+        "attention_rho0.80": ("A80", (6, 4)),
+        "attention_rho0.90": ("A90", (-25, 10)),
+        "attention_rho0.95": ("A95", (6, 12)),
+        "acceptance_feedback": ("B", (6, 6)),
+        "hybrid_rho0.80": ("H80", (6, -10)),
+        "hybrid_rho0.90": ("H90", (-28, -12)),
+        "hybrid_rho0.95": ("H95", (10, -7)),
+    }
+    return styles.get(strategy, (strategy, (6, 4)))
 
 
 def plot_frontier(summaries: Sequence[StrategySummary], path: Path) -> None:
@@ -245,16 +260,17 @@ def plot_frontier(summaries: Sequence[StrategySummary], path: Path) -> None:
             [summary.mean_k for summary in ordered],
             [summary.proxy_mean_accept for summary in ordered],
             "o-",
-            label="Static K (proxy)",
+            label="Static proxy",
         )
     for summary in adaptive:
         ax.scatter(summary.mean_k, summary.proxy_mean_accept, marker="^", s=45)
+        label, offset = frontier_annotation_style(summary.strategy)
         ax.annotate(
-            summary.strategy,
+            label,
             (summary.mean_k, summary.proxy_mean_accept),
-            xytext=(4, 3),
+            xytext=offset,
             textcoords="offset points",
-            fontsize=6,
+            fontsize=8,
         )
     for summary in observed:
         ax.scatter(
@@ -263,18 +279,51 @@ def plot_frontier(summaries: Sequence[StrategySummary], path: Path) -> None:
             marker="*",
             s=140,
             color="black",
-            label="Recorded K (observed)",
+            label="Observed",
         )
     if adaptive:
-        ax.scatter([], [], marker="^", s=45, label="Adaptive (proxy)")
+        ax.scatter([], [], marker="^", s=45, label="Adaptive proxy")
     ax.set_title("Figure 2: Acceptance proxy versus average visual K")
     ax.set_xlabel("Average visual K")
     ax.set_ylabel("Mean accepted length")
     ax.grid(alpha=0.25)
+    ax.margins(y=0.12)
     ax.legend()
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
+
+
+def matched_static_cost_reduction(summaries: Sequence[StrategySummary]) -> tuple:
+    """Return the best positive K reduction at non-lower proxy acceptance."""
+
+    static = [
+        summary
+        for summary in summaries
+        if summary.kind == "static" and summary.evidence == "proxy"
+    ]
+    adaptive = [
+        summary
+        for summary in summaries
+        if summary.kind != "static" and summary.evidence == "proxy"
+    ]
+    candidates = []
+    for adaptive_summary in adaptive:
+        comparable = [
+            static_summary
+            for static_summary in static
+            if static_summary.proxy_mean_accept + 1e-12
+            >= adaptive_summary.proxy_mean_accept
+        ]
+        if not comparable:
+            continue
+        static_summary = min(comparable, key=lambda summary: summary.mean_k)
+        reduction = 1.0 - adaptive_summary.mean_k / static_summary.mean_k
+        if reduction > 0.0:
+            candidates.append((adaptive_summary, static_summary, reduction))
+    if not candidates:
+        return None, None, 0.0
+    return max(candidates, key=lambda item: item[2])
 
 
 def _go_no_go(summaries: Sequence[StrategySummary]) -> Dict[str, str]:
@@ -293,16 +342,20 @@ def _go_no_go(summaries: Sequence[StrategySummary]) -> Dict[str, str]:
         "INSUFFICIENT EVIDENCE / NO-GO — the available traces contain measured acceptance only "
         "at recorded visual K≈996; all multi-K and adaptive acceptance values are proxies."
     )
-    if adaptive:
-        best = min(adaptive, key=lambda summary: summary.mean_k)
-        saving = 100.0 * (1.0 - best.mean_k / 4096.0)
+    matched_adaptive, matched_static, reduction = matched_static_cost_reduction(summaries)
+    if matched_adaptive is not None:
         q3 = (
-            f"POSSIBLE BUT UNVERIFIED — {best.strategy} changes estimated draft attention cost by "
-            f"{saving:+.1f}% versus static K=4096. Controller/collection overhead and dense verification "
-            "must be measured in a later authorized runtime experiment before claiming wall-clock speedup."
+            f"POSSIBLE BUT UNVERIFIED — {matched_adaptive.strategy} uses {100.0 * reduction:.1f}% "
+            f"less visual KV than {matched_static.strategy} at approximately matched proxy acceptance "
+            f"({matched_adaptive.proxy_mean_accept:.3f} vs {matched_static.proxy_mean_accept:.3f}). "
+            "Controller/collection overhead and dense verification must be measured in a later "
+            "authorized runtime experiment before claiming wall-clock speedup."
         )
     else:
-        q3 = "UNAVAILABLE — no adaptive strategies were evaluated."
+        q3 = (
+            "NO PROXY COST ADVANTAGE — no adaptive point uses less visual KV than a static point "
+            "with non-lower proxy acceptance; wall-clock speedup is unverified."
+        )
     return {"q1": q1, "q2": q2, "q3": q3, "decision": "NO-GO"}
 
 
@@ -406,6 +459,8 @@ def write_report(
         "![Adaptive K by round](figure1_adaptive_k_by_round.png)",
         "",
         "![Acceptance versus average K](figure2_acceptance_vs_average_k.png)",
+        "",
+        "Point labels: A = Attention Top-P, B = Acceptance Feedback, H = Hybrid; numbers are rho percentages.",
         "",
         "The plotted static/adaptive frontier is a sensitivity proxy, not a measured Pareto frontier.",
         "",

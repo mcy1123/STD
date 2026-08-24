@@ -3,15 +3,22 @@ from __future__ import annotations
 import csv
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
+
+from std_repro.adaptive_k_offline import StrategySummary
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "analysis" / "simulate_adaptive_k.py"
+SCRIPT_GLOBALS = runpy.run_path(str(SCRIPT))
+matched_static_cost_reduction = SCRIPT_GLOBALS["matched_static_cost_reduction"]
+frontier_annotation_style = SCRIPT_GLOBALS["frontier_annotation_style"]
 
 
 def _write_trace_set(base: Path, *, corrupt_round_count: bool = False) -> None:
@@ -134,3 +141,58 @@ def test_cli_rejects_trace_metadata_round_count_mismatch(tmp_path: Path) -> None
 
     assert result.returncode != 0
     assert "round count mismatch" in result.stderr.lower()
+
+
+def _summary(name: str, kind: str, mean_k: float, proxy_accept: float) -> StrategySummary:
+    return StrategySummary(
+        strategy=name,
+        kind=kind,
+        evidence="proxy",
+        rounds=1,
+        mean_k=mean_k,
+        median_k=mean_k,
+        min_k=int(mean_k),
+        max_k=int(mean_k),
+        coefficient_of_variation=0.0,
+        iqr_k=0.0,
+        change_fraction=0.0,
+        observed_mean_accept=4.0,
+        observed_accept_rate=0.5,
+        proxy_mean_accept=proxy_accept,
+        proxy_accept_rate=proxy_accept / 9.0,
+        observed_efficiency=1.0,
+        proxy_efficiency=1.0,
+        controller_fallbacks=0,
+    )
+
+
+def test_matched_cost_reduction_uses_acceptance_comparable_static_point() -> None:
+    summaries = [
+        _summary("static_k4096", "static", 4096.0, 6.20),
+        _summary("static_k8192", "static", 8192.0, 6.71),
+        _summary("acceptance_feedback", "acceptance", 4608.0, 6.07),
+        _summary("attention_rho0.80", "attention", 5429.0, 6.67),
+    ]
+
+    adaptive, static, reduction = matched_static_cost_reduction(summaries)
+
+    assert adaptive.strategy == "attention_rho0.80"
+    assert static.strategy == "static_k8192"
+    assert reduction == pytest.approx(1.0 - 5429.0 / 8192.0)
+
+
+def test_frontier_annotations_use_unique_short_labels_and_cluster_offsets() -> None:
+    strategies = [
+        "attention_rho0.80",
+        "attention_rho0.90",
+        "attention_rho0.95",
+        "acceptance_feedback",
+        "hybrid_rho0.80",
+        "hybrid_rho0.90",
+        "hybrid_rho0.95",
+    ]
+
+    styles = [frontier_annotation_style(strategy) for strategy in strategies]
+
+    assert len({label for label, _ in styles}) == len(strategies)
+    assert len({offset for _, offset in styles[1:]}) == len(styles[1:])

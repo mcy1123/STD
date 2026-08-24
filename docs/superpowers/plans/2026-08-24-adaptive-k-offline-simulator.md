@@ -40,7 +40,7 @@ Add literal tests covering the smallest cumulative Top-P K, lower/upper clamping
 ```python
 prefill = np.array([0.7, 0.2, 0.1, 0.0])
 round_scores = np.array([
-    [0.1, 0.1, 0.1, 0.7],
+    [0.4, 0.3, 0.2, 0.1],
     [0.6, 0.2, 0.1, 0.1],
 ])
 bounds = BudgetBounds(k_min=1, k_max=4, visual_len=4)
@@ -251,4 +251,3 @@ Expected: zero test failures, compile exit zero, no whitespace errors, and no mo
 git add PROGRESS.md
 git commit -m "docs: record adaptive k offline findings"
 ```
-
