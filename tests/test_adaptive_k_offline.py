@@ -226,6 +226,22 @@ def test_aggregate_summaries_excludes_sample_boundaries_from_change_fraction() -
     assert summary.change_fraction == pytest.approx(0.5)
 
 
+def test_aggregate_acceptance_is_macro_averaged_across_samples() -> None:
+    rows = [
+        RoundResult.minimal("short", "s", 0, k=1, accepted=0.0, proposed=2),
+        RoundResult.minimal("long", "s", 0, k=1, accepted=2.0, proposed=2),
+        RoundResult.minimal("long", "s", 1, k=1, accepted=2.0, proposed=2),
+        RoundResult.minimal("long", "s", 2, k=1, accepted=2.0, proposed=2),
+    ]
+
+    summary = aggregate_summaries(rows, [StrategySpec(name="s", kind="static", static_k=1)])[0]
+
+    assert summary.observed_mean_accept == pytest.approx(1.0)
+    assert summary.observed_accept_rate == pytest.approx(0.5)
+    assert summary.proxy_mean_accept == pytest.approx(1.0)
+    assert summary.proxy_accept_rate == pytest.approx(0.5)
+
+
 def test_default_strategies_have_requested_static_and_adaptive_rows() -> None:
     strategies = default_strategies()
 

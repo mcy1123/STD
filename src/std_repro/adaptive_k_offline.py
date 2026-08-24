@@ -366,7 +366,6 @@ def _summarize(spec: StrategySpec, rows: Sequence[RoundResult]) -> StrategySumma
     k_values = np.asarray([row.k for row in rows], dtype=np.float64)
     observed = np.asarray([row.accepted_observed for row in rows], dtype=np.float64)
     proxy = np.asarray([row.proxy_accept for row in rows], dtype=np.float64)
-    proposed = np.asarray([row.proposed for row in rows], dtype=np.float64)
     transitions = 0
     changes = 0
     grouped: Dict[str, List[RoundResult]] = {}
@@ -376,6 +375,20 @@ def _summarize(spec: StrategySpec, rows: Sequence[RoundResult]) -> StrategySumma
         ordered = sorted(sample_rows, key=lambda row: row.round_id)
         transitions += max(0, len(ordered) - 1)
         changes += sum(left.k != right.k for left, right in zip(ordered, ordered[1:]))
+    sample_observed_means = []
+    sample_observed_rates = []
+    sample_proxy_means = []
+    sample_proxy_rates = []
+    for sample_rows in grouped.values():
+        sample_observed = np.asarray(
+            [row.accepted_observed for row in sample_rows], dtype=np.float64
+        )
+        sample_proxy = np.asarray([row.proxy_accept for row in sample_rows], dtype=np.float64)
+        sample_proposed = np.asarray([row.proposed for row in sample_rows], dtype=np.float64)
+        sample_observed_means.append(float(sample_observed.mean()))
+        sample_observed_rates.append(float(sample_observed.sum() / sample_proposed.sum()))
+        sample_proxy_means.append(float(sample_proxy.mean()))
+        sample_proxy_rates.append(float(sample_proxy.sum() / sample_proposed.sum()))
     mean_k = float(k_values.mean())
     budget_units = float(k_values.sum() / 1024.0)
     return StrategySummary(
@@ -390,10 +403,10 @@ def _summarize(spec: StrategySpec, rows: Sequence[RoundResult]) -> StrategySumma
         coefficient_of_variation=float(k_values.std() / mean_k) if mean_k else 0.0,
         iqr_k=float(np.percentile(k_values, 75) - np.percentile(k_values, 25)),
         change_fraction=float(changes / transitions) if transitions else 0.0,
-        observed_mean_accept=float(observed.mean()),
-        observed_accept_rate=float(observed.sum() / proposed.sum()),
-        proxy_mean_accept=float(proxy.mean()),
-        proxy_accept_rate=float(proxy.sum() / proposed.sum()),
+        observed_mean_accept=float(np.mean(sample_observed_means)),
+        observed_accept_rate=float(np.mean(sample_observed_rates)),
+        proxy_mean_accept=float(np.mean(sample_proxy_means)),
+        proxy_accept_rate=float(np.mean(sample_proxy_rates)),
         observed_efficiency=float(observed.sum() / budget_units),
         proxy_efficiency=float(proxy.sum() / budget_units),
         controller_fallbacks=sum(row.controller_fallbacks for row in rows),
