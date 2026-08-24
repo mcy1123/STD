@@ -67,7 +67,7 @@ For each next-round decision, compute Attention Mass Top-P K and Acceptance Feed
 
 ### Observed replay metrics
 
-The report gives the recorded mean accepted length and accept rate (`sum(accepted) / sum(query_lens where available, otherwise rounds * gamma)`). These values are repeated only as the observed K=996 baseline and are not attributed to a counterfactual controller.
+The report gives the recorded mean accepted length and accept rate. Proposed draft length is reconstructed as `query_len` for round zero and `query_len - 1` for later rounds (which include the pending dense token); this exactly reproduces the frozen decoder's `proposed_draft_tokens`. The fallback is `gamma` when query lengths are unavailable. These values are repeated only as the observed K=996 baseline and are not attributed to a counterfactual controller.
 
 ### Proxy sensitivity metrics
 
@@ -75,7 +75,9 @@ For each decision K, compute predictive mass coverage by applying the selection 
 
 The proxy is anchored to observed accepted length at recorded K:
 
-`estimated_accept_t(K) = clip(observed_accept_t * coverage_t(K) / coverage_t(recorded_k), 0, gamma)`.
+`estimated_accept_t(K) = clip(observed_accept_t * candidate_coverage_t(K) / recorded_static_coverage_t(recorded_k), 0, proposed_t)`.
+
+The denominator always uses the actual recorded static selector: prefill Top-K at `recorded_k`. The numerator uses the candidate's selector and budget. This anchors the proxy to the observed trajectory while allowing the sensitivity analysis to represent both changed ranking and changed K.
 
 This estimate is reported under an explicit `proxy` label and cannot independently satisfy the Q2 GO gate. Rounds with zero denominator fall back to observed acceptance and are counted in a warning field.
 
