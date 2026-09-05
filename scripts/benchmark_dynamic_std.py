@@ -44,6 +44,7 @@ import pandas as pd  # noqa: E402
 
 from benchmark_std import (  # noqa: E402
     VIDEO_TOKEN_ID,
+    build_mismatch_diagnostic,
     load_qwen_model,
     make_qwen_video_inputs,
 )
@@ -54,6 +55,7 @@ from std_repro.std_qwen25vl import (  # noqa: E402
     tokens_equal,
 )
 from std_repro.dynamic_std_qwen25vl import dynamic_std_generate_qwen25vl  # noqa: E402
+from std_repro.verification_policy import positional_token_metrics  # noqa: E402
 
 
 def iter_vdc_samples(data_dir: str, limit: int):
@@ -104,6 +106,21 @@ def _std_fields(prefix: str, result, dstats, match: bool) -> dict:
         f"{prefix}_total_collect_ms": dstats["total_collect_time_ms"],
         f"{prefix}_mean_jaccard": dstats["mean_jaccard_old_new"],
         f"{prefix}_mean_changed_tokens": dstats["mean_changed_tokens"],
+        f"{prefix}_fallback_count": result.fallback_count,
+        f"{prefix}_verify_margin_reruns": result.verify_margin_reruns,
+        f"{prefix}_min_verify_margin": result.min_verify_margin,
+    }
+
+
+def _agreement_fields(prefix: str, candidate, reference, tokenizer, eos_token_id: int) -> dict:
+    diagnostic = build_mismatch_diagnostic(reference, candidate, tokenizer, eos_token_id)
+    metrics = positional_token_metrics(reference, candidate)
+    return {
+        f"{prefix}_mismatch_token_count": metrics["mismatch_token_count"],
+        f"{prefix}_token_level_agreement": metrics["token_level_agreement"],
+        f"{prefix}_common_prefix_length": diagnostic["common_prefix_length"],
+        f"{prefix}_first_ar_token_id": diagnostic["ar_token_id"],
+        f"{prefix}_first_candidate_token_id": diagnostic["std_token_id"],
     }
 
 
@@ -118,6 +135,36 @@ def main() -> None:
     parser.add_argument("--k-plus-text", type=int, default=1024)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--gpu", default="0")
+    parser.add_argument(
+        "--verify-fallback",
+        choices=[
+            "none",
+            "sequential_on_reject",
+            "sequential_on_low_accept",
+            "sequential_on_low_margin",
+            "sequential_guard",
+        ],
+        default="sequential_on_low_margin",
+        help="Correctness fallback applied after fast parallel verification.",
+    )
+    parser.add_argument(
+        "--verify-margin-threshold",
+        type=float,
+        default=0.1,
+        help="Top-1/top-2 logit margin below which sequential re-verification is used.",
+    )
+    parser.add_argument("--sequential-fallback-max-accept", type=int, default=1)
+    parser.add_argument(
+        "--max-mismatch-tokens",
+        type=int,
+        default=2,
+        help="Maximum tolerated positional token mismatches per generated sample.",
+    )
+    parser.add_argument(
+        "--fail-on-correctness",
+        action="store_true",
+        help="Abort after writing a record when any decoder exceeds max-mismatch-tokens.",
+    )
     parser.add_argument("--output", default=str(ROOT / "results" / "dynamic_std_mvp" / "vdc10_3col.jsonl"))
     args = parser.parse_args()
 
@@ -135,6 +182,10 @@ def main() -> None:
     print(f"Dataset={args.dataset}  samples={len(samples)}  frame={args.frame_num} "
           f"max_new={args.max_new_tokens}  gamma={args.gamma}", flush=True)
 
+    mismatch_totals = {"static": 0, "mvp": 0, "opt": 0}
+    agreement_totals = {"static": 0.0, "mvp": 0.0, "opt": 0.0}
+    within_tolerance = {"static": 0, "mvp": 0, "opt": 0}
+    completed_samples = 0
     with out_path.open("w", encoding="utf-8") as f:
         for idx, s in enumerate(samples):
             inputs = make_qwen_video_inputs(
@@ -154,6 +205,9 @@ def main() -> None:
                 gamma=args.gamma,
                 target_k_plus_text=args.k_plus_text,
                 ignore_eos=True,
+                verify_fallback=args.verify_fallback,
+                verify_margin_threshold=args.verify_margin_threshold,
+                sequential_fallback_max_accept=args.sequential_fallback_max_accept,
             )
 
             # Dynamic MVP (V1 collector + full rebuild refresh)
@@ -166,6 +220,9 @@ def main() -> None:
                 ignore_eos=True,
                 collector_version="v1",
                 refresh_mode="full",
+                verify_fallback=args.verify_fallback,
+                verify_margin_threshold=args.verify_margin_threshold,
+                sequential_fallback_max_accept=args.sequential_fallback_max_accept,
             )
 
             # Dynamic optimized (fused V3 collector + full rebuild refresh)
@@ -178,12 +235,30 @@ def main() -> None:
                 ignore_eos=True,
                 collector_version="v3",
                 refresh_mode="full",
+                verify_fallback=args.verify_fallback,
+                verify_margin_threshold=args.verify_margin_threshold,
+                sequential_fallback_max_accept=args.sequential_fallback_max_accept,
             )
 
             ar_suffix = generated_suffix(ar.output_ids, prompt_len)
             static_match = tokens_equal(generated_suffix(static.output_ids, prompt_len), ar_suffix)
             mvp_match = tokens_equal(generated_suffix(mvp.output_ids, prompt_len), ar_suffix)
             opt_match = tokens_equal(generated_suffix(opt.output_ids, prompt_len), ar_suffix)
+            static_suffix = generated_suffix(static.output_ids, prompt_len)
+            mvp_suffix = generated_suffix(mvp.output_ids, prompt_len)
+            opt_suffix = generated_suffix(opt.output_ids, prompt_len)
+            static_agreement = _agreement_fields(
+                "static", static_suffix, ar_suffix, processor.tokenizer, eos
+            )
+            mvp_agreement = _agreement_fields(
+                "mvp", mvp_suffix, ar_suffix, processor.tokenizer, eos
+            )
+            opt_agreement = _agreement_fields(
+                "opt", opt_suffix, ar_suffix, processor.tokenizer, eos
+            )
+            opt_static_agreement = _agreement_fields(
+                "opt_static", opt_suffix, static_suffix, processor.tokenizer, eos
+            )
 
             record = {
                 "dataset": args.dataset,
@@ -195,6 +270,9 @@ def main() -> None:
                 "gamma": args.gamma,
                 "max_new_tokens": args.max_new_tokens,
                 "ar_generate_len": ar.generate_len,
+                "verify_fallback": args.verify_fallback,
+                "verify_margin_threshold": args.verify_margin_threshold,
+                "max_mismatch_tokens": args.max_mismatch_tokens,
             }
             record.update(_std_fields("static", static, {
                 "total_refresh_time_ms": 0.0, "mean_refresh_time_ms": 0.0,
@@ -203,12 +281,32 @@ def main() -> None:
             }, static_match))
             record.update(_std_fields("mvp", mvp, dstats_mvp, mvp_match))
             record.update(_std_fields("opt", opt, dstats_opt, opt_match))
+            record.update(static_agreement)
+            record.update(mvp_agreement)
+            record.update(opt_agreement)
+            record.update(opt_static_agreement)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
+
+            completed_samples += 1
+            for name, fields in (
+                ("static", static_agreement),
+                ("mvp", mvp_agreement),
+                ("opt", opt_agreement),
+            ):
+                mismatches = fields[f"{name}_mismatch_token_count"]
+                mismatch_totals[name] += mismatches
+                agreement_totals[name] += fields[f"{name}_token_level_agreement"]
+                within_tolerance[name] += int(mismatches <= args.max_mismatch_tokens)
 
             print(
                 f"[{idx}] {s['sample_id']}  prompt={prompt_len} visual={sel.visual_len} k={sel.k}\n"
                 f"    token_match(AR): static={static_match} mvp={mvp_match} opt={opt_match}\n"
+                f"    mismatch_tokens: static={static_agreement['static_mismatch_token_count']}  "
+                f"mvp={mvp_agreement['mvp_mismatch_token_count']}  "
+                f"opt={opt_agreement['opt_mismatch_token_count']}\n"
+                f"    fallback_rounds: static={static.fallback_count}  "
+                f"mvp={mvp.fallback_count}  opt={opt.fallback_count}\n"
                 f"    mean_accept:     static={static.mean_accept_length:5.2f}  "
                 f"mvp={mvp.mean_accept_length:5.2f}  opt={opt.mean_accept_length:5.2f}\n"
                 f"    accept_rate:     static={static.acceptance_rate:5.3f}  "
@@ -224,10 +322,36 @@ def main() -> None:
                 flush=True,
             )
 
+            failures = {
+                name: fields[f"{name}_mismatch_token_count"]
+                for name, fields in (
+                    ("static", static_agreement),
+                    ("mvp", mvp_agreement),
+                    ("opt", opt_agreement),
+                )
+                if fields[f"{name}_mismatch_token_count"] > args.max_mismatch_tokens
+            }
+            if args.fail_on_correctness and failures:
+                raise RuntimeError(
+                    f"Correctness tolerance exceeded for sample {s['sample_id']}: {failures}"
+                )
+
             del inputs, ar, static, mvp, opt, sel, dsel_mvp, dsel_opt
             torch.cuda.empty_cache()
 
     print(f"\nDone. -> {out_path}", flush=True)
+    if completed_samples:
+        print(
+            f"Correctness tolerance (<= {args.max_mismatch_tokens} mismatches/sample):",
+            flush=True,
+        )
+        for name in ("static", "mvp", "opt"):
+            print(
+                f"  {name}: {within_tolerance[name]}/{completed_samples} within tolerance, "
+                f"total mismatches={mismatch_totals[name]}, "
+                f"mean agreement={agreement_totals[name] / completed_samples:.6f}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

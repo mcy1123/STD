@@ -21,6 +21,10 @@ from specvlm.kv_cache.kv_cache import initialize_past_key_values
 from specvlm.models import modeling_qwen2_5_vl as qwen_mod
 from specvlm.utils.utils import get_last_video_idx
 from std_repro.triton_attention import fused_gqa_attention
+from std_repro.verification_policy import (
+    min_prediction_margin as _min_prediction_margin,
+    needs_sequential_fallback as _needs_sequential_fallback,
+)
 
 
 # [STD-ANALYSIS] Optional read-only attention-trace collector. None during
@@ -113,23 +117,6 @@ def _profile_mark(enabled: bool) -> float:
     if enabled:
         torch.cuda.synchronize()
     return time.time()
-
-
-def _min_prediction_margin(
-    logits: torch.Tensor,
-    prediction_indices: Sequence[int],
-    has_dense_pending: bool,
-) -> Optional[float]:
-    logit_indices = []
-    for prediction_idx in prediction_indices:
-        logit_idx = prediction_idx if has_dense_pending else prediction_idx - 1
-        if 0 <= logit_idx < logits.shape[1]:
-            logit_indices.append(logit_idx)
-    if not logit_indices:
-        return None
-    selected = logits[0, logit_indices, :].float()
-    top2 = torch.topk(selected, k=2, dim=-1).values
-    return float((top2[:, 0] - top2[:, 1]).min().item())
 
 
 def _split_video_text_inputs(
@@ -644,13 +631,22 @@ def std_generate_qwen25vl(
 
     if verify_mode not in {"parallel", "sequential"}:
         raise ValueError(f"Unsupported verify_mode={verify_mode!r}; expected 'parallel' or 'sequential'.")
-    if verify_fallback not in {"none", "sequential_on_reject", "sequential_on_low_accept", "sequential_guard"}:
+    if verify_fallback not in {
+        "none",
+        "sequential_on_reject",
+        "sequential_on_low_accept",
+        "sequential_on_low_margin",
+        "sequential_guard",
+    }:
         raise ValueError(
             "verify_fallback must be 'none', 'sequential_on_reject', "
-            "'sequential_on_low_accept', or 'sequential_guard'."
+            "'sequential_on_low_accept', 'sequential_on_low_margin', or "
+            "'sequential_guard'."
         )
     if sequential_fallback_max_accept < 0:
         raise ValueError("sequential_fallback_max_accept must be non-negative.")
+    if verify_fallback == "sequential_on_low_margin" and verify_margin_threshold is None:
+        raise ValueError("sequential_on_low_margin requires verify_margin_threshold.")
     if adaptive_gamma_min is not None and not (1 <= adaptive_gamma_min <= gamma):
         raise ValueError("adaptive_gamma_min must be between 1 and gamma.")
     if adaptive_gamma_mode not in {"accept_len", "conservative"}:
@@ -788,6 +784,7 @@ def std_generate_qwen25vl(
 
         stage_start = _profile_mark(profile_decode)
         if verify_mode == "parallel":
+            low_margin = False
             verify_input = dense_pending + draft
             verify_tensor = torch.tensor([verify_input], dtype=torch.long, device=device)
             _trace = _TRACE_COLLECTOR
@@ -815,7 +812,8 @@ def std_generate_qwen25vl(
                 )
                 if margin is not None:
                     verify_margins.append(margin)
-                if margin is not None and margin < verify_margin_threshold:
+                low_margin = margin is not None and margin < verify_margin_threshold
+                if low_margin and verify_fallback != "sequential_on_low_margin":
                     verify_margin_reruns += 1
                     _fill_cache_length(dense_lengths, dense_cached_len)
                     with _sdpa_backend_context("math"):
@@ -851,17 +849,17 @@ def std_generate_qwen25vl(
                     fallback_accepted_extra += math_accept_len - accept_len
                 accept_len = math_accept_len
                 bonus_token = dense_predictions[accept_len]
-            needs_sequential_fallback = (
-                verify_fallback == "sequential_guard"
-                or (verify_fallback == "sequential_on_reject" and accept_len < len(draft))
-                or (
-                    verify_fallback == "sequential_on_low_accept"
-                    and accept_len < len(draft)
-                    and accept_len <= sequential_fallback_max_accept
-                )
+            needs_sequential_fallback = _needs_sequential_fallback(
+                verify_fallback,
+                accept_len=accept_len,
+                draft_len=len(draft),
+                sequential_fallback_max_accept=sequential_fallback_max_accept,
+                low_margin=low_margin,
             )
             if needs_sequential_fallback:
                 fallback_count += 1
+                if low_margin and verify_fallback == "sequential_on_low_margin":
+                    verify_margin_reruns += 1
                 seq_accept_len, seq_bonus_token = _sequential_verify_draft(
                     model,
                     draft,

@@ -468,6 +468,24 @@ def main() -> None:
     parser.add_argument("--target-k-plus-text", type=int, default=1024)
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--verify-mode", choices=["parallel", "sequential"], default="parallel")
+    parser.add_argument(
+        "--verify-fallback",
+        choices=[
+            "none",
+            "sequential_on_reject",
+            "sequential_on_low_accept",
+            "sequential_on_low_margin",
+            "sequential_guard",
+        ],
+        default="none",
+    )
+    parser.add_argument("--sequential-fallback-max-accept", type=int, default=1)
+    parser.add_argument("--verify-margin-threshold", type=float, default=None)
+    parser.add_argument(
+        "--verify-attn-backend",
+        choices=["default", "math", "math_on_full_accept"],
+        default="default",
+    )
     parser.add_argument("--sparse-attn-mode", choices=["gqa_sdpa", "repeat_sdpa", "triton_gqa"], default="gqa_sdpa")
     parser.add_argument("--strict-equality", action="store_true", help="Abort if STD generated tokens differ from AR.")
     parser.add_argument(
@@ -590,10 +608,14 @@ def main() -> None:
                     target_k_plus_text=args.target_k_plus_text,
                     explicit_k=args.k,
                     verify_mode=args.verify_mode,
+                    verify_fallback=args.verify_fallback,
+                    sequential_fallback_max_accept=args.sequential_fallback_max_accept,
                     profile_decode=args.profile_decode,
                     sparse_attn_mode=args.sparse_attn_mode,
                     copy_sparse_prefill=not args.no_copy_sparse_prefill,
                     profile_prefill=args.profile_prefill,
+                    verify_attn_backend=args.verify_attn_backend,
+                    verify_margin_threshold=args.verify_margin_threshold,
                     ignore_eos=args.ignore_eos,
                 )
             std_peak_memory_gib = peak_memory_gib()
@@ -660,6 +682,10 @@ def main() -> None:
                 "k": selection.k,
                 "gamma": args.gamma,
                 "verify_mode": args.verify_mode,
+                "verify_fallback": args.verify_fallback,
+                "verify_margin_threshold": args.verify_margin_threshold,
+                "sequential_fallback_max_accept": args.sequential_fallback_max_accept,
+                "verify_attn_backend": args.verify_attn_backend,
                 "sparse_attn_mode": args.sparse_attn_mode,
                 "copy_sparse_prefill": not args.no_copy_sparse_prefill,
                 "profile_decode": args.profile_decode,
@@ -693,6 +719,10 @@ def main() -> None:
                 "acceptance_rate": std.acceptance_rate,
                 "mean_accept_length": std.mean_accept_length,
                 "decode_rounds": std.decode_rounds,
+                "fallback_count": std.fallback_count,
+                "fallback_accepted_extra": std.fallback_accepted_extra,
+                "verify_margin_reruns": std.verify_margin_reruns,
+                "min_verify_margin": std.min_verify_margin,
                 "draft_time_per_round": std.draft_time / std.decode_rounds if std.decode_rounds else 0.0,
                 "verify_time_per_round": std.verify_time / std.decode_rounds if std.decode_rounds else 0.0,
                 "committed_tokens_per_round": std.generate_len / std.decode_rounds if std.decode_rounds else 0.0,

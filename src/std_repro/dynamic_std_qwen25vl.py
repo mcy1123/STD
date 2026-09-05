@@ -47,7 +47,10 @@ from std_repro.std_qwen25vl import (
     _draft_tokens,
     _fill_cache_length,
     _first_model_device,
+    _min_prediction_margin,
+    _needs_sequential_fallback,
     _profile_mark,
+    _sequential_verify_draft,
     _split_video_text_inputs,
     _token_argmax,
     build_sparse_selection,
@@ -74,6 +77,9 @@ def dynamic_std_generate_qwen25vl(
     ignore_eos: bool = False,
     collector_version: str = "v1",
     refresh_mode: str = "full",
+    verify_fallback: str = "none",
+    verify_margin_threshold: Optional[float] = None,
+    sequential_fallback_max_accept: int = 1,
 ) -> Tuple[GenerateResult, SparseSelection, Dict]:
     """Verification-guided greedy decoding with dynamic visual selection.
 
@@ -86,6 +92,20 @@ def dynamic_std_generate_qwen25vl(
         raise ValueError(f"Unsupported collector_version={collector_version!r}; expected 'v1', 'v2' or 'v3'.")
     if refresh_mode not in {"full", "incremental"}:
         raise ValueError(f"Unsupported refresh_mode={refresh_mode!r}; expected 'full' or 'incremental'.")
+    if verify_fallback not in {
+        "none",
+        "sequential_on_reject",
+        "sequential_on_low_accept",
+        "sequential_on_low_margin",
+        "sequential_guard",
+    }:
+        raise ValueError(f"Unsupported verify_fallback={verify_fallback!r}.")
+    if verify_fallback == "sequential_on_low_margin" and verify_margin_threshold is None:
+        raise ValueError("sequential_on_low_margin requires verify_margin_threshold.")
+    if verify_margin_threshold is not None and verify_margin_threshold < 0:
+        raise ValueError("verify_margin_threshold must be non-negative.")
+    if sequential_fallback_max_accept < 0:
+        raise ValueError("sequential_fallback_max_accept must be non-negative.")
 
     torch.cuda.synchronize()
     start = time.time()
@@ -172,6 +192,10 @@ def dynamic_std_generate_qwen25vl(
     cache_adjust_time = 0.0
     decode_rounds = 0
     refresh_records: List[Dict] = []
+    fallback_count = 0
+    fallback_accepted_extra = 0
+    verify_margin_reruns = 0
+    verify_margins: List[float] = []
 
     torch.cuda.synchronize()
     decode_start = time.time()
@@ -209,6 +233,41 @@ def dynamic_std_generate_qwen25vl(
         while accept_len < len(draft) and draft[accept_len] == dense_predictions[accept_len]:
             accept_len += 1
         bonus_token = dense_predictions[accept_len]
+
+        low_margin = False
+        if verify_margin_threshold is not None:
+            margin = _min_prediction_margin(
+                verify_outputs.logits,
+                range(accept_len + 1),
+                has_dense_pending=bool(dense_pending),
+            )
+            if margin is not None:
+                verify_margins.append(margin)
+                low_margin = margin < verify_margin_threshold
+
+        if _needs_sequential_fallback(
+            verify_fallback,
+            accept_len=accept_len,
+            draft_len=len(draft),
+            sequential_fallback_max_accept=sequential_fallback_max_accept,
+            low_margin=low_margin,
+        ):
+            fallback_count += 1
+            if low_margin:
+                verify_margin_reruns += 1
+            seq_accept_len, seq_bonus_token = _sequential_verify_draft(
+                model,
+                draft,
+                dense_pending,
+                dense_next,
+                dense_pkv,
+                dense_lengths,
+                dense_cached_len,
+            )
+            if seq_accept_len > accept_len:
+                fallback_accepted_extra += seq_accept_len - accept_len
+            accept_len = seq_accept_len
+            bonus_token = seq_bonus_token
         verify_time += _profile_mark(profile_decode) - stage_start
         accept_lengths.append(accept_len)
         accepted_total += accept_len
@@ -293,6 +352,10 @@ def dynamic_std_generate_qwen25vl(
         mean_accept_length=mean_accept,
         decode_rounds=decode_rounds,
         final_gamma=gamma,
+        fallback_count=fallback_count,
+        fallback_accepted_extra=fallback_accepted_extra,
+        verify_margin_reruns=verify_margin_reruns,
+        min_verify_margin=min(verify_margins) if verify_margins else 0.0,
         proposed_lengths=proposed_lengths,
         accept_lengths=accept_lengths,
         draft_time=draft_time,
