@@ -178,7 +178,23 @@ conda create -y -p /public/home/xlwang/mcy/conda_envs/specvlm python=3.10 pip
 
 Expected: Conda completes successfully and creates the target interpreter.
 
-- [ ] **Step 3: Install the pinned CUDA 12.4 PyTorch wheels**
+- [ ] **Step 3: Preinstall a binary Pillow wheel from PyPI**
+
+The CUDA wheel index does not contain Pillow's build dependency `pybind11`,
+and pip 26 otherwise selects a Pillow source distribution from that index.
+Install a compatible binary wheel before resolving torchvision:
+
+```bash
+conda run -p /public/home/xlwang/mcy/conda_envs/specvlm \
+  python -m pip install pillow==11.3.0 \
+  --index-url https://pypi.org/simple \
+  --only-binary=:all:
+```
+
+Expected: pip installs the CPython 3.10 manylinux wheel without invoking a
+compiler or modifying global pip configuration.
+
+- [ ] **Step 4: Install the pinned CUDA 12.4 PyTorch wheels**
 
 Run:
 
@@ -190,7 +206,7 @@ conda run -p /public/home/xlwang/mcy/conda_envs/specvlm \
 
 Expected: pip installs both pinned packages successfully.
 
-- [ ] **Step 4: Install STD's remaining dependencies**
+- [ ] **Step 5: Install STD's remaining dependencies**
 
 Run:
 
@@ -209,7 +225,7 @@ conda run -p /public/home/xlwang/mcy/conda_envs/specvlm \
 Expected: pip exits 0. The quoted datasets requirement must remain quoted so
 the shell does not create another `=2.14` artifact.
 
-- [ ] **Step 5: Verify imports and exact pinned versions without probing CUDA**
+- [ ] **Step 6: Verify imports and exact pinned versions without probing CUDA**
 
 Run:
 
