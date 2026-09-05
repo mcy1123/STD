@@ -14,9 +14,9 @@
 
 - Run every deployment command on `login2`; do not SSH to `gpu23` in this stage.
 - Keep code at `/public/home/xlwang/mcy/Project/STD`.
-- Keep the environment at `/public/home/xlwang/mcy/conda_envs/specvlm` and address it with `conda run -p`, never by the shared name `specvlm`.
+- Keep the environment at `/public/home/xlwang/mcy/conda_envs/specvlm` and address its executables by absolute path, never by the shared name `specvlm`.
 - Keep model, dataset, processor cache, and results under `/public/home/xlwang/mcy/STD_assets`.
-- Install Python 3.10, PyTorch 2.6.0, torchvision 0.21.0, Transformers 4.48.0, qwen-vl-utils 0.0.10, PyAV 14.0.0, Triton 3.2.0, datasets 2.14 or newer, accelerate, and huggingface_hub.
+- Install Python 3.10, PyTorch 2.6.0, torchvision 0.21.0, Transformers 4.48.0, qwen-vl-utils 0.0.10, PyAV 14.0.0, Triton 3.2.0, datasets 2.18.0, accelerate 1.3.0, huggingface_hub 0.28.1, NumPy 1.26.4, pandas 2.2.3, and PyArrow 15.0.2.
 - Preserve the untracked remote artifact `/public/home/xlwang/mcy/Project/STD/=2.14,`.
 - Do not reuse or modify `/public/home/xlwang/jyy/anaconda/envs/specvlm`.
 - Stop before a large download if `/public` free space is below 100 GB.
@@ -206,34 +206,42 @@ conda run -p /public/home/xlwang/mcy/conda_envs/specvlm \
 
 Expected: pip installs both pinned packages successfully.
 
-- [ ] **Step 5: Install STD's remaining dependencies**
+- [ ] **Step 5: Install STD's remaining dependencies from binary wheels**
 
 Run:
 
 ```bash
-conda run -p /public/home/xlwang/mcy/conda_envs/specvlm \
-  python -m pip install \
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python -m pip install \
+  --index-url https://pypi.org/simple \
+  --only-binary=:all: \
+  numpy==1.26.4 \
   transformers==4.48.0 \
-  'datasets>=2.14' \
-  accelerate \
+  datasets==2.18.0 \
+  pyarrow==15.0.2 \
+  pandas==2.2.3 \
+  accelerate==1.3.0 \
   qwen-vl-utils==0.0.10 \
   av==14.0.0 \
   triton==3.2.0 \
-  huggingface_hub
+  huggingface_hub==0.28.1
 ```
 
-Expected: pip exits 0. The quoted datasets requirement must remain quoted so
-the shell does not create another `=2.14` artifact.
+Expected: pip exits 0 and downloads wheels only. Directly invoking the target
+interpreter avoids Conda 4.11 reconstructing and misquoting shell metacharacters.
 
 - [ ] **Step 6: Verify imports and exact pinned versions without probing CUDA**
 
 Run:
 
 ```bash
-conda run -p /public/home/xlwang/mcy/conda_envs/specvlm python - <<'PY'
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python - <<'PY'
 import av
+import accelerate
 import datasets
 import huggingface_hub
+import numpy
+import pandas
+import pyarrow
 import qwen_vl_utils
 import torch
 import transformers
@@ -242,6 +250,12 @@ import triton
 assert torch.__version__.startswith('2.6.0')
 assert torch.version.cuda == '12.4'
 assert transformers.__version__ == '4.48.0'
+assert datasets.__version__ == '2.18.0'
+assert accelerate.__version__ == '1.3.0'
+assert huggingface_hub.__version__ == '0.28.1'
+assert numpy.__version__ == '1.26.4'
+assert pandas.__version__ == '2.2.3'
+assert pyarrow.__version__ == '15.0.2'
 assert av.__version__ == '14.0.0'
 assert triton.__version__ == '3.2.0'
 print({
@@ -249,9 +263,13 @@ print({
     'torch_cuda_wheel': torch.version.cuda,
     'transformers': transformers.__version__,
     'datasets': datasets.__version__,
+    'accelerate': accelerate.__version__,
+    'huggingface_hub': huggingface_hub.__version__,
+    'numpy': numpy.__version__,
+    'pandas': pandas.__version__,
+    'pyarrow': pyarrow.__version__,
     'av': av.__version__,
     'triton': triton.__version__,
-    'huggingface_hub': huggingface_hub.__version__,
     'cuda_probe_skipped': True,
 })
 PY
@@ -306,7 +324,7 @@ the user to authenticate interactively without exposing a token in logs.
 Run:
 
 ```bash
-conda run -p /public/home/xlwang/mcy/conda_envs/specvlm python - <<'PY'
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python - <<'PY'
 import json
 from pathlib import Path
 
@@ -356,9 +374,8 @@ Run:
 
 ```bash
 cd /public/home/xlwang/mcy/Project/STD
-conda run --no-capture-output \
-  -p /public/home/xlwang/mcy/conda_envs/specvlm \
-  python scripts/prepare_std_datasets.py \
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
+  scripts/prepare_std_datasets.py \
   --dataset Video-MME \
   --output-root /public/home/xlwang/mcy/STD_assets/datasets \
   --videomme-chunks 01
@@ -373,9 +390,8 @@ Run:
 
 ```bash
 cd /public/home/xlwang/mcy/Project/STD
-conda run --no-capture-output \
-  -p /public/home/xlwang/mcy/conda_envs/specvlm \
-  python scripts/extract_videomme_chunks.py \
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
+  scripts/extract_videomme_chunks.py \
   --dataset-dir /public/home/xlwang/mcy/STD_assets/datasets/Video-MME \
   --output-dir /public/home/xlwang/mcy/STD_assets/datasets/Video-MME/videos \
   --chunks 01
@@ -389,9 +405,8 @@ Run:
 
 ```bash
 cd /public/home/xlwang/mcy/Project/STD
-conda run --no-capture-output \
-  -p /public/home/xlwang/mcy/conda_envs/specvlm \
-  python scripts/check_videomme_assets.py \
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
+  scripts/check_videomme_assets.py \
   --metadata-path /public/home/xlwang/mcy/STD_assets/datasets/Video-MME \
   --video-root /public/home/xlwang/mcy/STD_assets/datasets/Video-MME/videos \
   --output /public/home/xlwang/mcy/STD_assets/results/videomme_asset_check.jsonl
@@ -419,8 +434,8 @@ Run:
 
 ```bash
 cd /public/home/xlwang/mcy/Project/STD
-conda run -p /public/home/xlwang/mcy/conda_envs/specvlm \
-  python -m compileall -q src scripts tests
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
+  -m compileall -q src scripts tests
 ```
 
 Expected: exit 0 with no syntax errors.
@@ -458,9 +473,8 @@ Do not execute it in this deployment stage:
 ```bash
 cd /public/home/xlwang/mcy/Project/STD
 SPECVLM_MAX_CACHE_LEN=40960 \
-conda run --no-capture-output \
-  -p /public/home/xlwang/mcy/conda_envs/specvlm \
-  python scripts/benchmark_std.py \
+/public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
+  scripts/benchmark_std.py \
   --model-path /public/home/xlwang/mcy/STD_assets/models/Qwen2.5-VL-7B-Instruct \
   --dataset Video-MME \
   --data-path /public/home/xlwang/mcy/STD_assets/datasets/Video-MME \
