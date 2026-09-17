@@ -43,26 +43,129 @@ class SelectionState:
 
 
 def topk_indices(scores: torch.Tensor, k: int) -> torch.Tensor:
-    """Top-K indices along the last dim of ``scores`` (descending relevance)."""
-    return torch.argsort(scores, dim=-1, descending=True)[..., :k]
+    """Indices of the K largest scores (ordering within the result is unspecified)."""
+    if k < 1 or k > scores.shape[-1]:
+        raise ValueError(f"k must be in [1, {scores.shape[-1]}], got {k}.")
+    # Full argsort is O(N log N) even though routing only needs K entries.
+    # ``sorted=False`` avoids an unnecessary ordering pass; callers that need
+    # stable absolute positions sort the selected K indices afterward.
+    return torch.topk(scores, k, dim=-1, largest=True, sorted=False).indices
+
+
+def should_refresh_selection(
+    round_id: int,
+    changed_ratio: float,
+    interval: int = 1,
+    min_changed_ratio: float = 0.0,
+) -> bool:
+    """Return whether a candidate routing update should reach the sparse cache.
+
+    ``round_id`` is one-based. ``changed_ratio`` is Jaccard distance (1 minus
+    set overlap), not the fraction of K tokens replaced. Tiny Top-K changes
+    are ignored so they do not trigger a costly cache rewrite.
+    """
+    if round_id < 1:
+        raise ValueError("round_id must be positive")
+    if interval < 1:
+        raise ValueError("interval must be positive")
+    if not 0.0 <= changed_ratio <= 1.0:
+        raise ValueError("changed_ratio must be between 0 and 1")
+    if not 0.0 <= min_changed_ratio <= 1.0:
+        raise ValueError("min_changed_ratio must be between 0 and 1")
+    return round_id % interval == 0 and changed_ratio >= min_changed_ratio
 
 
 def topk_jaccard(a: torch.Tensor, b: torch.Tensor) -> float:
     """Mean Jaccard over layers and KV heads of two [L, H, k] top-K selections."""
+    intersections = topk_intersection_counts(a, b).float()
+    unions = 2 * a.shape[-1] - intersections
+    return float((intersections / unions.clamp_min(1)).mean()) if intersections.numel() else 0.0
+
+
+def topk_intersection_counts(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Per-layer/head intersection sizes without Python sets or token loops.
+
+    Top-K selections contain unique indices, but need not arrive sorted.
+    """
     if a.shape != b.shape:
         raise ValueError(f"Selection shape mismatch: {a.shape} vs {b.shape}.")
-    L, H, K = a.shape
-    total = 0.0
-    n = 0
-    for l in range(L):
-        for h in range(H):
-            sa = set(int(x) for x in a[l, h].tolist())
-            sb = set(int(x) for x in b[l, h].tolist())
-            inter = len(sa & sb)
-            union = len(sa | sb)
-            total += inter / union if union else 0.0
-            n += 1
-    return total / n if n else 0.0
+    if a.ndim != 3:
+        raise ValueError("Selections must have shape [layers, heads, k].")
+    k = a.shape[-1]
+    if k == 0:
+        return torch.zeros(a.shape[:-1], dtype=torch.long, device=a.device)
+    sorted_a = torch.sort(a, dim=-1).values.contiguous()
+    sorted_b = torch.sort(b, dim=-1).values.contiguous()
+    positions = torch.searchsorted(sorted_b, sorted_a)
+    matches = (positions < k) & (sorted_b.gather(-1, positions.clamp(max=k - 1)) == sorted_a)
+    return matches.sum(dim=-1)
+
+
+def attention_free_visual_topk(
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    k: int,
+    coverage_ratio: float = 0.25,
+    value_weight: float = 0.25,
+    window_size: int = 0,
+) -> torch.Tensor:
+    """Select a shared visual top-K from cached K/V without attention scores.
+
+    ``keys`` and ``values`` have shape ``[layers, kv_heads, visual_len, dim]``.
+    A windowed centroid residual and value norm are z-normalized per
+    layer/head, averaged across layers, and combined with deterministic
+    uniform coverage.  The returned indices are ``[kv_heads, k]`` and sorted.
+    This is a bootstrap heuristic only; it is deliberately independent of the
+    model implementation so it can be tested on CPU and compared against the
+    attention-selected bootstrap.
+    """
+    if keys.ndim != 4 or values.shape != keys.shape:
+        raise ValueError("keys and values must have equal shape [layers, heads, visual_len, dim].")
+    layers, heads, visual_len, _ = keys.shape
+    if not 1 <= k <= visual_len:
+        raise ValueError(f"k must be in [1, {visual_len}], got {k}.")
+    if not 0.0 <= coverage_ratio <= 1.0:
+        raise ValueError("coverage_ratio must be between 0 and 1.")
+    if value_weight < 0:
+        raise ValueError("value_weight must be non-negative.")
+    if window_size < 0:
+        raise ValueError("window_size must be non-negative (0 means global).")
+
+    kf = keys.float()
+    vf = values.float()
+    window_size = min(window_size or visual_len, visual_len)
+    full_length = (visual_len // window_size) * window_size
+    blocks = kf[:, :, :full_length].reshape(layers, heads, -1, window_size, keys.shape[-1])
+    residual = torch.linalg.vector_norm(blocks - blocks.mean(dim=3, keepdim=True), dim=-1).flatten(2)
+    if full_length < visual_len:
+        tail = kf[:, :, full_length:]
+        residual = torch.cat([
+            residual, torch.linalg.vector_norm(tail - tail.mean(dim=2, keepdim=True), dim=-1)
+        ], dim=2)
+    value_norm = torch.linalg.vector_norm(vf, dim=-1)
+
+    def _zscore(x: torch.Tensor) -> torch.Tensor:
+        return (x - x.mean(dim=-1, keepdim=True)) / x.std(
+            dim=-1, keepdim=True, unbiased=False
+        ).clamp_min(1e-6)
+
+    scores = (_zscore(residual) + value_weight * _zscore(value_norm)).mean(dim=0)
+    coverage_k = min(k, int(round(k * coverage_ratio)))
+    coverage = torch.div(
+        torch.arange(coverage_k, device=keys.device) * visual_len,
+        max(coverage_k, 1),
+        rounding_mode="floor",
+    ).long() if coverage_k else torch.empty(0, dtype=torch.long, device=keys.device)
+    selected_rows = []
+    for head in range(heads):
+        mask = torch.ones(visual_len, dtype=torch.bool, device=keys.device)
+        if coverage.numel():
+            mask[coverage] = False
+        remaining = k - coverage.numel()
+        candidates = torch.nonzero(mask, as_tuple=False).flatten()
+        core = candidates[torch.topk(scores[head, candidates], remaining, sorted=False).indices] if remaining else candidates[:0]
+        selected_rows.append(torch.sort(torch.cat([coverage, core])).values)
+    return torch.stack(selected_rows, dim=0)
 
 
 def stack_topk(topk_positions: List[torch.Tensor]) -> torch.Tensor:
@@ -205,30 +308,48 @@ class RuntimeVerificationCollector:
         self.collect_time += time.perf_counter() - t0
 
 
-def verification_query_positions(accept_len: int, pending_len: int, propose_len: int) -> List[int]:
-    """Pick the three representative verification query positions.
+def verification_query_positions(
+    accept_len: int,
+    pending_len: int,
+    propose_len: int,
+    mode: str = "three",
+) -> List[int]:
+    """Pick representative verification query positions.
 
     The dense verification forward runs ``verify_input = dense_pending + draft``
     of length ``L = pending_len + propose_len``. Output position ``i`` predicts the
-    greedy target for ``verify_input[i]``. Instead of summing attention over all
-    ``L`` queries (V1), V2 keeps only three decision-relevant queries:
+    greedy target for ``verify_input[i]``. V2's ``two`` mode keeps the first
+    available query and the query that predicts the bonus token; ``three`` is a
+    legacy control that additionally samples one lookahead query:
 
       * ``first_valid``    — position 0 (the first speculative prediction);
       * ``accept_boundary``— position ``pending_len + accept_len - 1`` (the query
         whose input is the last accepted draft token, and whose output is the
         bonus token), present iff ``accept_len >= 1``;
-      * ``bonus``          — position ``pending_len + accept_len`` (the first
-        non-accepted token, where the bonus replaces the rejected draft), clamped
-        to the last query.
+      * ``legacy_lookahead`` — position ``pending_len + accept_len`` in three-query
+        mode, clamped to the last query.
 
     Positions are deduplicated and clamped to ``[0, L)``.
     """
+    if mode not in {"two", "three"}:
+        raise ValueError("mode must be 'two' or 'three'.")
     L = pending_len + propose_len
-    candidates: List[int] = []
-    candidates.append(0)
-    if accept_len >= 1:
-        candidates.append(pending_len + accept_len - 1)
-    candidates.append(min(pending_len + accept_len, L - 1))
+    candidates: List[int] = [0]
+    if mode == "two":
+        # The bonus token is predicted by the query after the last accepted
+        # input. With pending context and zero accepted drafts, q0 is already
+        # that bonus query; with no pending context, q0 is the only available
+        # proxy because the first token came from dense_next.
+        if accept_len >= 1:
+            candidates.append(pending_len + accept_len - 1)
+        elif pending_len > 0:
+            candidates.append(0)
+    else:
+        # Keep the legacy three-query control, including its lookahead query
+        # after the rejection boundary, for apples-to-apples ablations.
+        if accept_len >= 1:
+            candidates.append(pending_len + accept_len - 1)
+        candidates.append(min(pending_len + accept_len, L - 1))
     seen = set()
     out: List[int] = []
     for p in candidates:

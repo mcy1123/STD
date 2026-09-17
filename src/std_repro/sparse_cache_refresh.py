@@ -22,6 +22,8 @@ from typing import List
 
 import torch
 
+from std_repro.dynamic_selection import topk_intersection_counts
+
 
 def refresh_sparse_visual_kv(
     sparse_past_key_values,
@@ -67,6 +69,10 @@ def refresh_sparse_visual_kv(
             index = index.view(1, kv_heads, compact_len, 1).expand(bsz, kv_heads, compact_len, head_dim)
             compacted = ddata.gather(2, index).contiguous()
             data[:, :, :compact_len, :].copy_(compacted)
+        # A full rebuild restores sorted physical layout.  Discard any slot
+        # bookkeeping left by an earlier incremental refresh.
+        if hasattr(layer_cache[0], "_std_visual_slot_map"):
+            delattr(layer_cache[0], "_std_visual_slot_map")
 
     torch.cuda.synchronize()
     return time.perf_counter() - t0
@@ -75,16 +81,8 @@ def refresh_sparse_visual_kv(
 def count_changed_tokens(old_topk: torch.Tensor, new_topk: torch.Tensor) -> float:
     """Mean number of visual tokens replaced per (layer, head) when going
     from ``old_topk`` to ``new_topk`` (both ``[num_layers, kv_heads, k]``)."""
-    if old_topk.shape != new_topk.shape:
-        raise ValueError(f"top-K shape mismatch: {old_topk.shape} vs {new_topk.shape}.")
-    L, H, K = old_topk.shape
-    total = 0
-    for l in range(L):
-        for h in range(H):
-            so = set(int(x) for x in old_topk[l, h].tolist())
-            sn = set(int(x) for x in new_topk[l, h].tolist())
-            total += K - len(so & sn)
-    return total / (L * H) if L * H else 0.0
+    intersections = topk_intersection_counts(old_topk, new_topk)
+    return float((old_topk.shape[-1] - intersections).float().mean()) if intersections.numel() else 0.0
 
 
 def incremental_refresh_sparse_visual_kv(
@@ -139,15 +137,27 @@ def incremental_refresh_sparse_visual_kv(
         if m_total == 0:
             continue
 
+        # Maintain an explicit map because replacing a removed slot with an
+        # added token intentionally does not preserve sorted physical order.
+        # Recomputing the slot from the sorted rank on a later round can
+        # overwrite a non-visual token (or leave stale visual KV behind).
+        metadata_cache = layer_cache[0]
+        slot_map = getattr(metadata_cache, "_std_visual_slot_map", None)
+        if slot_map is None:
+            slot_map = torch.stack(
+                [torch.searchsorted(non_visual, old_t[h]) + torch.arange(K) for h in range(old_t.shape[0])],
+                dim=0,
+            )
+        elif slot_map.shape != old_t.shape:
+            raise RuntimeError("Incremental refresh slot metadata shape mismatch.")
+
         # Flatten changed slots across heads (row-major, so removed[i] pairs
         # with added[i] of the same head).
         idx = torch.nonzero(removed_mask, as_tuple=False)   # [M, 2] -> (head, rank)
         head_idx = idx[:, 0]                                # [M]
         rank = idx[:, 1]                                    # [M]
-        removed_val = old_t[removed_mask]                   # [M]
         added_val = new_t[added_mask]                       # [M]
-        # Physical slot = (# non_visual < r) + rank.
-        phys = torch.searchsorted(non_visual, removed_val) + rank
+        phys = slot_map[head_idx, rank]
 
         for cache, dense_cache in zip(layer_cache, dense_layer):
             data = cache.data                               # [bsz, kv_heads, max_len, hd]
@@ -157,6 +167,17 @@ def incremental_refresh_sparse_visual_kv(
             a_idx = added_val.to(ddata.device)              # [M]
             added_kv = ddata[:, h_idx, a_idx, :]            # [bsz, M, head_dim]
             data[:, h_idx, p_idx, :] = added_kv
+
+        # Retained visual tokens keep their physical slots; added tokens reuse
+        # the slots of removed tokens.  Store the mapping in new sorted-token
+        # order for the next round.  K/V caches share the same slot layout.
+        new_slot_map = torch.empty_like(new_t)
+        if bool(in_old.any()):
+            old_rank = pos2.clamp(max=K - 1)
+            new_slot_map[in_old] = slot_map.gather(1, old_rank)[in_old]
+        if bool(added_mask.any()):
+            new_slot_map[added_mask] = phys
+        metadata_cache._std_visual_slot_map = new_slot_map
 
     torch.cuda.synchronize()
     return time.perf_counter() - t0

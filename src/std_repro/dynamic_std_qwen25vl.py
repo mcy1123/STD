@@ -28,9 +28,12 @@ from specvlm.kv_cache.kv_cache import initialize_past_key_values
 from std_repro.dynamic_selection import (
     PreviousVerifyTopKPolicy,
     RuntimeVerificationCollector,
+    SelectionState,
     StaticPolicy,
     VerificationCollectorV2,
     VerificationCollectorV3,
+    attention_free_visual_topk,
+    should_refresh_selection,
     verification_query_positions,
 )
 from std_repro.sparse_cache_refresh import (
@@ -59,6 +62,48 @@ from std_repro.std_qwen25vl import (
 )
 
 
+def build_attention_free_selection_from_cache(
+    past_key_values,
+    full_input_ids: torch.Tensor,
+    video_token_id: int,
+    text_start: int,
+    target_k_plus_text: int = 1024,
+    explicit_k: Optional[int] = None,
+    coverage_ratio: float = 0.25,
+    value_weight: float = 0.25,
+    window_size: int = 0,
+    layer_stride: int = 1,
+) -> SparseSelection:
+    """Build the initial visual mask from canonical video-prefix K/V only."""
+    prompt_ids = full_input_ids[0]
+    visual_positions = torch.nonzero(prompt_ids == video_token_id, as_tuple=False).flatten().cpu()
+    if visual_positions.numel() == 0:
+        raise ValueError("Cannot build attention-free selection without visual/video token positions.")
+    non_visual_positions = torch.nonzero(prompt_ids != video_token_id, as_tuple=False).flatten().cpu()
+    prompt_len = int(prompt_ids.numel())
+    text_len = max(1, prompt_len - int(text_start))
+    k = int(explicit_k) if explicit_k is not None else max(1, int(target_k_plus_text) - text_len)
+    k = min(k, int(visual_positions.numel()))
+    device = past_key_values[0][0].data.device
+    visual_gpu = visual_positions.to(device)
+    selected_layers = past_key_values[::layer_stride]
+    keys = torch.stack([layer[0].data[0, :, visual_gpu, :].detach() for layer in selected_layers], dim=0)
+    values = torch.stack([layer[1].data[0, :, visual_gpu, :].detach() for layer in selected_layers], dim=0)
+    local_topk = attention_free_visual_topk(
+        keys, values, k=k, coverage_ratio=coverage_ratio, value_weight=value_weight,
+        window_size=window_size,
+    ).cpu()
+    selected = torch.sort(visual_positions[local_topk], dim=-1).values
+    return SparseSelection(
+        topk_positions=[selected.clone() for _ in range(len(past_key_values))],
+        non_visual_positions=non_visual_positions,
+        prompt_len=prompt_len,
+        visual_len=int(visual_positions.numel()),
+        text_len=text_len,
+        k=k,
+    )
+
+
 @torch.inference_mode()
 def dynamic_std_generate_qwen25vl(
     model,
@@ -75,8 +120,16 @@ def dynamic_std_generate_qwen25vl(
     sparse_attn_mode: str = "gqa_sdpa",
     copy_sparse_prefill: bool = True,
     ignore_eos: bool = False,
-    collector_version: str = "v1",
-    refresh_mode: str = "full",
+    collector_version: str = "v2",
+    refresh_mode: str = "incremental",
+    selection_update_interval: int = 1,
+    min_selection_change_ratio: float = 0.05,
+    query_mode: str = "three",
+    bootstrap_mode: str = "attention",
+    bootstrap_coverage_ratio: float = 0.25,
+    bootstrap_value_weight: float = 0.25,
+    bootstrap_window_tokens: int = 0,
+    bootstrap_layer_stride: int = 1,
     verify_fallback: str = "none",
     verify_margin_threshold: Optional[float] = None,
     sequential_fallback_max_accept: int = 1,
@@ -106,6 +159,20 @@ def dynamic_std_generate_qwen25vl(
         raise ValueError("verify_margin_threshold must be non-negative.")
     if sequential_fallback_max_accept < 0:
         raise ValueError("sequential_fallback_max_accept must be non-negative.")
+    if selection_update_interval < 1:
+        raise ValueError("selection_update_interval must be positive.")
+    if not 0.0 <= min_selection_change_ratio <= 1.0:
+        raise ValueError("min_selection_change_ratio must be between 0 and 1.")
+    if query_mode not in {"two", "three"}:
+        raise ValueError("query_mode must be 'two' or 'three'.")
+    if bootstrap_mode not in {"attention", "attention_free"}:
+        raise ValueError("bootstrap_mode must be 'attention' or 'attention_free'.")
+    if not 0.0 <= bootstrap_coverage_ratio <= 1.0:
+        raise ValueError("bootstrap_coverage_ratio must be between 0 and 1.")
+    if bootstrap_value_weight < 0:
+        raise ValueError("bootstrap_value_weight must be non-negative.")
+    if bootstrap_window_tokens < 0 or bootstrap_layer_stride < 1:
+        raise ValueError("bootstrap_window_tokens must be non-negative and bootstrap_layer_stride positive.")
 
     torch.cuda.synchronize()
     start = time.time()
@@ -126,28 +193,43 @@ def dynamic_std_generate_qwen25vl(
     dense_pkv, _, dense_lengths = initialize_past_key_values(model)
     copy_prompt_cache(selection_pkv, dense_pkv, dense_lengths, text_start)
     # 3. Selection branch (custom attention) -> static S_0, never enters dense verifier.
-    selection_output = model(input_ids=text_input_ids, past_key_values=selection_pkv, output_attentions=True)
-    attentions = selection_output.attentions
+    # The attention-free option derives the initial mask from the canonical
+    # video-prefix K/V and therefore skips this extra text prefill.
+    attentions = None
+    if bootstrap_mode == "attention":
+        selection_output = model(input_ids=text_input_ids, past_key_values=selection_pkv, output_attentions=True)
+        attentions = selection_output.attentions
     # 4. Dense branch (canonical) -> verifier KV + canonical next token.
     dense_output = model(input_ids=text_input_ids, past_key_values=dense_pkv, output_attentions=False)
     if dense_output.attentions is not None:
         raise RuntimeError("Correctness invariant violated: dense prefill returned attentions.")
     dense_next = _token_argmax(dense_output.logits)
     selection_prefill_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
-    if attentions is None:
-        raise RuntimeError("Selection prefill did not return attentions.")
-
     stage_start = _profile_mark(profile_prefill)
-    selection = build_sparse_selection(
-        attentions,
-        prompt_ids,
-        video_token_id,
-        text_start,
-        target_k_plus_text=target_k_plus_text,
-        explicit_k=explicit_k,
-        num_key_value_heads=model.config.num_key_value_heads,
-    )
-    del attentions
+    if bootstrap_mode == "attention":
+        if attentions is None:
+            raise RuntimeError("Selection prefill did not return attentions.")
+        selection = build_sparse_selection(
+            attentions, prompt_ids, video_token_id, text_start,
+            target_k_plus_text=target_k_plus_text, explicit_k=explicit_k,
+            num_key_value_heads=model.config.num_key_value_heads,
+        )
+        del attentions
+    else:
+        # Qwen merges each temporal slice's H*W visual patches spatially.
+        # Auto windows follow those temporal slices rather than a global
+        # centroid, which can mistake between-frame offsets for importance.
+        if bootstrap_window_tokens == 0:
+            grid = inputs.get("video_grid_thw")
+            if grid is not None and grid.shape[0] == 1:
+                merge = model.config.vision_config.spatial_merge_size
+                bootstrap_window_tokens = int(grid[0, 1] * grid[0, 2]) // (merge * merge)
+        selection = build_attention_free_selection_from_cache(
+            selection_pkv, prompt_ids, video_token_id, text_start,
+            target_k_plus_text=target_k_plus_text, explicit_k=explicit_k,
+            coverage_ratio=bootstrap_coverage_ratio, value_weight=bootstrap_value_weight,
+            window_size=bootstrap_window_tokens, layer_stride=bootstrap_layer_stride,
+        )
     selection_time = _profile_mark(profile_prefill) - stage_start if profile_prefill else 0.0
     controller = SparseDraftController(model, selection, sparse_attn_mode=sparse_attn_mode, use_compile=False)
     controller.install()
@@ -192,6 +274,8 @@ def dynamic_std_generate_qwen25vl(
     cache_adjust_time = 0.0
     decode_rounds = 0
     refresh_records: List[Dict] = []
+    selection_update_time = 0.0
+    skipped_selection_updates = 0
     fallback_count = 0
     fallback_accepted_extra = 0
     verify_margin_reruns = 0
@@ -208,6 +292,8 @@ def dynamic_std_generate_qwen25vl(
         context_len = prompt_ids.shape[1] + len(generated)
         dense_cached_len = context_len - len(dense_pending)
         sparse_prev_len = sparse_prompt_len + len(generated)
+        collect_due = decode_rounds % selection_update_interval == 0
+        update_due = policy == "previous_verify_topk" and collect_due
 
         # Step 1: sparse draft using current selection S_t.
         stage_start = _profile_mark(profile_decode)
@@ -220,9 +306,11 @@ def dynamic_std_generate_qwen25vl(
         stage_start = _profile_mark(profile_decode)
         verify_input = dense_pending + draft
         verify_tensor = torch.tensor([verify_input], dtype=torch.long, device=device)
-        collector.begin_verification(decode_rounds)
+        if collect_due:
+            collector.begin_verification(decode_rounds)
         verify_outputs = model(input_ids=verify_tensor, past_key_values=dense_pkv)
-        collector.end_verification()
+        if collect_due:
+            collector.end_verification()
         verify_argmax = torch.argmax(verify_outputs.logits[0], dim=-1).tolist()
         if dense_pending:
             dense_predictions = [int(x) for x in verify_argmax]
@@ -274,15 +362,41 @@ def dynamic_std_generate_qwen25vl(
 
         # Step 3-4: update selection S_{t+1} = TopK(A_t) and refresh the sparse
         # cache's visual prefix in place (non-visual + generated KV untouched).
+        query_positions = []
         if collector_version == "v2":
-            positions = verification_query_positions(accept_len, len(dense_pending), propose_len)
-            A_t = collector.compute(positions, dense_pkv)
+            positions = verification_query_positions(
+                accept_len, len(dense_pending), propose_len, mode=query_mode
+            )
+            query_positions = positions
+            A_t = collector.compute(positions, dense_pkv) if collect_due else None
         else:
             A_t = collector.latest_scores()
-        new_state = policy_impl.update(A_t, state, k)
+        candidate_state = policy_impl.update(A_t, state, k) if update_due else state
+        if update_due:
+            selection_update_time += float(candidate_state.update_time)
+        if not update_due:
+            skipped_selection_updates += 1
+        changed_ratio = 1.0 - float(candidate_state.selection_overlap)
+        accept_update = update_due and should_refresh_selection(
+            candidate_state.round_id,
+            changed_ratio,
+            interval=1,
+            min_changed_ratio=min_selection_change_ratio,
+        )
+        if accept_update:
+            new_state = candidate_state
+        else:
+            # Preserve the cache/selection when the candidate is stale or only
+            # marginally different.  Keep round accounting for diagnostics.
+            new_state = SelectionState(
+                indices=state.indices,
+                k=state.k,
+                round_id=candidate_state.round_id,
+                selection_overlap=1.0,
+                update_time=candidate_state.update_time,
+            )
         refresh_time = 0.0
         if policy == "previous_verify_topk" and not torch.equal(state.indices, new_state.indices):
-            stage_start = _profile_mark(profile_decode)
             if refresh_mode == "incremental":
                 refresh_time = incremental_refresh_sparse_visual_kv(
                     sparse_pkv, dense_pkv, non_visual_positions, state.indices, new_state.indices, k
@@ -291,7 +405,6 @@ def dynamic_std_generate_qwen25vl(
                 refresh_time = refresh_sparse_visual_kv(
                     sparse_pkv, dense_pkv, non_visual_positions, new_state.indices, k
                 )
-            refresh_time += _profile_mark(profile_decode) - stage_start
         refresh_records.append(
             {
                 "round_id": decode_rounds,
@@ -299,6 +412,9 @@ def dynamic_std_generate_qwen25vl(
                 "changed_ratio": float(1.0 - new_state.selection_overlap),
                 "changed_tokens": float(count_changed_tokens(state.indices, new_state.indices)),
                 "refresh_time_ms": float(refresh_time * 1000.0),
+                "update_applied": bool(accept_update),
+                "query_positions": query_positions,
+                "query_mode_effective": query_mode if collector_version == "v2" else "all",
             }
         )
         state = new_state
@@ -375,6 +491,12 @@ def dynamic_std_generate_qwen25vl(
         "policy": policy,
         "collector_version": collector_version,
         "refresh_mode": refresh_mode,
+        "query_mode": query_mode,
+        "bootstrap_mode": bootstrap_mode,
+        "bootstrap_coverage_ratio": bootstrap_coverage_ratio,
+        "bootstrap_value_weight": bootstrap_value_weight,
+        "bootstrap_window_tokens": bootstrap_window_tokens,
+        "bootstrap_layer_stride": bootstrap_layer_stride,
         "total_collect_time_ms": float(collector.collect_time * 1000.0),
         "per_round": refresh_records,
         "mean_jaccard_old_new": float(sum(r["jaccard_old_new"] for r in refresh_records) / len(refresh_records))
@@ -388,5 +510,8 @@ def dynamic_std_generate_qwen25vl(
         else 0.0,
         "total_refresh_time_ms": float(sum(refresh_ms)),
         "mean_refresh_time_ms": float(sum(refresh_ms) / len(refresh_ms)) if refresh_ms else 0.0,
+        "total_selection_update_time_ms": float(selection_update_time * 1000.0),
+        "skipped_selection_updates": skipped_selection_updates,
+        "collector_time_synchronized": collector_version in {"v1", "v2"},
     }
     return result, selection, dynamic_stats
