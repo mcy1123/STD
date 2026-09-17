@@ -17,7 +17,7 @@
 #   REPO PY ASSETS MODEL DATA VIDEOS OUTDIR GPU LIMIT REPEATS FRAMES TOKENS
 set -euo pipefail
 
-REPO="${REPO:-/public/home/xlwang/mcy/Project/STD}"
+REPO="${REPO:-/public/home/xlwang/mcy/Project/STD-latest}"
 PY="${PY:-/public/home/xlwang/mcy/conda_envs/specvlm/bin/python}"
 ASSETS="${ASSETS:-/public/home/xlwang/mcy/STD_assets}"
 MODEL="${MODEL:-$ASSETS/models/Qwen2.5-VL-7B-Instruct}"

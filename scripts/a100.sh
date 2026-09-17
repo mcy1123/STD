@@ -77,7 +77,7 @@ cmd_sync() {
 
 cmd_ablation() {
   local stage="${1:-stage0}"
-  on_gpu "cd ${A100_REPO} && export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 && bash scripts/run_a100_ablation.sh ${stage}"
+  on_gpu "cd ${A100_REPO} && export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 && REPO='${A100_REPO}' bash scripts/run_a100_ablation.sh ${stage}"
 }
 
 cmd_e2e() {
