@@ -14,6 +14,61 @@ COMPONENT_KEYS = (
 )
 
 
+def headroom_summary(groups, samples, methods):
+    """Per-sample paired acceptance plus H_headroom stratification.
+
+    Pairs every dynamic method against `static` on the *same* sample. The
+    aggregate mean is explicitly not trusted: on the 2026-09-09 A100 run it hid
+    a sign flip (+0.044 / -0.102 / -0.126 over three samples) that correlated
+    with how much headroom static still had.
+    """
+    dynamic_methods = [m for m in methods if m.startswith("dynamic_")]
+    static_accept = {
+        s: median(r.get("acceptance_rate", 0.0) for r in groups[s, "static"]) for s in samples
+    }
+
+    paired = []
+    for s in samples:
+        for m in dynamic_methods:
+            dyn = median(r.get("acceptance_rate", 0.0) for r in groups[s, m])
+            paired.append(
+                {
+                    "sample_id": s,
+                    "method": m,
+                    "static_accept": static_accept[s],
+                    "dynamic_accept": dyn,
+                    "delta_accept": dyn - static_accept[s],
+                }
+            )
+
+    strata = []
+    for m in dynamic_methods:
+        rows = sorted(
+            (p for p in paired if p["method"] == m), key=lambda p: p["static_accept"]
+        )
+        n = len(rows)
+        n_bins = min(3, n)
+        for b in range(n_bins):
+            # Equal-count edges over n_bins; using //3 here would drop every
+            # sample when n is smaller than the bin count.
+            lo, hi = (b * n) // n_bins, ((b + 1) * n) // n_bins
+            chunk = rows[lo:hi]
+            if not chunk:
+                continue
+            strata.append(
+                {
+                    "method": m,
+                    "bin": b,
+                    "n": len(chunk),
+                    "static_min": chunk[0]["static_accept"],
+                    "static_max": chunk[-1]["static_accept"],
+                    "mean_static_accept": sum(c["static_accept"] for c in chunk) / len(chunk),
+                    "mean_delta_accept": sum(c["delta_accept"] for c in chunk) / len(chunk),
+                }
+            )
+    return {"paired": paired, "strata": strata}
+
+
 def summarize(path):
     rows = [json.loads(s) for s in path.read_text().splitlines() if s.strip()]
     manifest = next(r for r in rows if r["kind"] == "manifest")
@@ -53,7 +108,13 @@ def summarize(path):
         for baseline in ("ar", "static"):
             for metric in ("decoding_time", "inference_time"):
                 totals[m][f"{metric}_speedup_vs_{baseline}"] = totals[baseline][metric] / totals[m][metric]
-    return {"manifest": manifest, "totals": totals, "per_sample": per_sample, "complete": complete}
+    return {
+        "manifest": manifest,
+        "totals": totals,
+        "per_sample": per_sample,
+        "headroom": headroom_summary(groups, samples, methods),
+        "complete": complete,
+    }
 
 
 def main():
@@ -94,6 +155,27 @@ def main():
         text.append(f"| {method} | {r['cache_init_time']:.3f} | {r['selection_prefill_time']:.3f} | "
                     f"{r['selection_time']:.3f} | {r['dense_prefill_time']:.3f} | {r['sparse_cache_time']:.3f} | "
                     f"{r['draft_time']:.3f} | {r['verify_time']:.3f} | {r['bonus_time']:.3f} | {r['cache_adjust_time']:.3f} |")
+    headroom = result.get("headroom") or {"paired": [], "strata": []}
+    if headroom["paired"]:
+        text += ["", "Per-sample paired acceptance (H_headroom; the aggregate mean is not trusted):",
+                 "| Method | Sample | Static accept | Dynamic accept | delta |",
+                 "|---|---|---:|---:|---:|"]
+        for p in headroom["paired"]:
+            text.append(
+                f"| {p['method']} | {p['sample_id']} | {p['static_accept']:.3f} | "
+                f"{p['dynamic_accept']:.3f} | {p['delta_accept']:+.3f} |"
+            )
+    if headroom["strata"]:
+        text += ["", "Stratified by static headroom (equal-count bins, LOW headroom first):",
+                 "| Method | Bin | n | static range | mean static accept | mean delta accept |",
+                 "|---|---:|---:|---|---:|---:|"]
+        for s in headroom["strata"]:
+            text.append(
+                f"| {s['method']} | {s['bin']} | {s['n']} | "
+                f"{s['static_min']:.3f}-{s['static_max']:.3f} | {s['mean_static_accept']:.3f} | "
+                f"{s['mean_delta_accept']:+.3f} |"
+            )
+
     text += ["", "Measured generation continues after EOS to equalize work. Inference includes prefill and decoding; "
              "both timing measures exclude model loading and video processing. Exact-trial counts compare complete "
              "token sequences against AR. Unequal outputs do not demonstrate lossless speedup.", "",
