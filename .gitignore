@@ -32,3 +32,6 @@ checkpoints/
 .DS_Store
 .vscode/
 .idea/
+
+# Third-party spec-workflow tool scaffolding (templates only, not project content)
+.spec-workflow/

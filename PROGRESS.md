@@ -19,6 +19,13 @@
 | 2026-08-21 | Dynamic STD MVP（Fixed-K Previous Top-K） | **GO** — VDC accept +1.66，correctness 保持 |
 | 2026-08-24 | Mismatch 根因因果验证 | prefill 已统一(Scheme B)；残余 5/10 根因是 batched verification |
 | 2026-08-24 | Dynamic STD wall-clock 优化 | collector/refresh 已到极限，瓶颈是 GPU-bound verify forward（0.98x） |
+| 2026-08-24 | Adaptive-K Phase 1（offline） | **NO-GO** — 只证明 budget 会变，未证明同 budget 下 acceptance 更好 |
+| 2026-08-24 | Adaptive-γ Phase 1（offline cost model） | **GO（仅 proxy/optimistic）** — acceptance controller 估计 +15.3% |
+| 2026-08-25 | Adaptive-γ runtime MVP + capped9 + fixed-q sweep | **CORRECTNESS NO-GO / FIXED-Q NO-GO** — 正确性门槛未过 |
+| 2026-09-05 | Verification fallback 诊断 | ⚠️ 单样本上 fallback 反而引入 mismatch，且 verify ~2× |
+| 2026-09-05 | ECNU Phase-8 部署（plan/design） | 事实已在 gpu23 跑通（见 §13） |
+| 2026-09-09 | Dynamic STD-VG Lite on A100/Video-MME | **❌ 负结果** — static accept 0.823 > dynamic 0.731–0.777，decode 也更慢 |
+| 2026-09-09 | HSD（嵌套投机）spike | **❌ 负结果** — 比 static STD 慢 2.76× |
 
 ---
 
@@ -168,6 +175,14 @@
 | V3 collector 提速 | collect_time 1432 → 176ms（8.1×） |
 | Dynamic 最终 decode speedup | 0.981×（未达 >1×） |
 | 残余 mismatch 根因 | batched q_len=γ+1 verification（非 prefill / 非 state machine） |
+| Adaptive-K offline | NO-GO（证据不足） |
+| Adaptive-γ offline（估计） | acceptance +15.32%、cost_aware +63.57%（`optimistic_estimate`） |
+| Adaptive-γ runtime | CORRECTNESS NO-GO（fixed vs adaptive 后缀不同） |
+| Adaptive-γ capped9 padding 占比 | 0.71% → 35.26% |
+| Adaptive-γ fixed-q sweep（q=10..14） | FIXED-Q NO-GO（minimal shared AR-exact q* = none） |
+| **Dynamic VG-Lite accept（A100/Video-MME，3 样本）** | **static 0.823 → dynamic 0.731–0.777（劣化）** |
+| **Dynamic VG-Lite decode（A100）** | static 32.6–34.4s → dynamic 37.9–41.8s（0.79–0.89×） |
+| HSD spike vs static STD | 慢 2.76×（decode）／2.32×（inference） |
 
 ---
 
@@ -175,34 +190,52 @@
 
 **核心实现**
 
-- `src/std_repro/dynamic_selection.py` — SelectionPolicy 接口；StaticPolicy；PreviousVerifyTopKPolicy；RuntimeVerificationCollector（V1）；VerificationCollectorV2（3-query 延迟）；VerificationCollectorV3（fused）。
-- `src/std_repro/dynamic_std_qwen25vl.py` — 动态 decode 主循环（`collector_version ∈ {v1,v2,v3}`，`refresh_mode ∈ {full,incremental}`）。
-- `src/std_repro/sparse_cache_refresh.py` — refresh_sparse_visual_kv（full rebuild）；incremental_refresh_sparse_visual_kv（弃用）。
+- `src/std_repro/dynamic_selection.py` — SelectionPolicy 接口；StaticPolicy；PreviousVerifyTopKPolicy；RuntimeVerificationCollector（V1）；VerificationCollectorV2（可配置 two/three-query 延迟）；VerificationCollectorV3（fused）；`attention_free_visual_topk`（无注意力 bootstrap）；`should_refresh_selection`（interval / hysteresis 调度）。
+- `src/std_repro/dynamic_std_qwen25vl.py` — 动态 decode 主循环（`collector_version ∈ {v1,v2,v3}`、`refresh_mode ∈ {full,incremental}`、`query_mode ∈ {two,three}`、`bootstrap_mode ∈ {attention,attention_free}`、`selection_update_interval`、`min_selection_change_ratio`）。
+- `src/std_repro/sparse_cache_refresh.py` — refresh_sparse_visual_kv（full rebuild）；incremental_refresh_sparse_visual_kv（带 `_std_visual_slot_map` 的 slot 追踪；性能/accept 仍不划算，默认不用）。
+- `src/std_repro/verification_policy.py` — `positional_token_metrics` / `min_prediction_margin` / `needs_sequential_fallback`。
+- `src/std_repro/hsd_spike.py` — HSD 嵌套投机可行性 spike（已判定负结果，见 §15）。
+- `src/std_repro/sparse_verify_spike.py` — q_len>1 offset-causal 稀疏验证原语（未接入 benchmark，见 §16）。
+- `src/std_repro/streaming_video.py` — PyAV 内存有界流式抽帧（A100 benchmark 已使用）。
 - `src/std_repro/std_qwen25vl.py` — 静态 STD 基线（Scheme B；`verify_mode` / `verify_attn_backend` / `verify_fallback`）。
 - `src/specvlm/models/modeling_qwen2_5_vl.py` — SpecVLM 自定义 attention（line 966）；`_std_trace_hook`（line 1065）。
 
 **分析 / 基准脚本**
 
 - `scripts/analysis/{attention_trace.py, collect_traces.py, analyze_routing.py}` — Oracle Study。
-- `scripts/benchmark_dynamic_std.py` — AR / Static / Dynamic 三列对比。
+- `scripts/analysis/simulate_adaptive_k.py` — Adaptive-K offline 模拟。
+- `scripts/benchmark_dynamic_std.py` — 本地 AR / Static / Dynamic 三列对比（VDC）。
+- `scripts/benchmark_a100_dynamic.py` — A100/Video-MME 动态对比（streaming 抽帧、组件计时、配对 JSONL）。
+- `scripts/summarize_a100_dynamic.py` — 由 JSONL 生成 `_summary.json` 与 `_report.md`。
+- `scripts/benchmark_a100_hsd_spike.py` — HSD 四路对比。
 - 一次性 `diagnose_*` / `forensic_*` / `probe_optimize.py` / `profile_std_breakdown.py` / `regress_std_correctness.py` / `verify_scheme_b.py` 已在结论固化后清理；核心 benchmark、trace collector 与实验结果保留。
 
 **产出数据**
 
 - `results/routing_analysis/`、`results/routing_analysis_mlvu/` — Oracle Study 分析 CSV。
 - `results/dynamic_std_mvp/vdc10_3col_v3.jsonl` — 最终三列回归。
-- `results/dynamic_std_mvp/vdc10_3col.jsonl`、`vdc10.jsonl`、`smoke_mlvu*.jsonl` — 早期基准。
+- `results/adaptive_k_offline/`、`results/adaptive_gamma_offline/`、`results/adaptive_gamma_runtime*/`、`results/adaptive_gamma_fixed_q_sweep*/` — offline 模拟与 γ 运行时/sweep。
+- `results/correctness_fallback_a6000/` — fallback A/B 诊断。
+- `results/a100_dynamic_20260909_*.jsonl|_summary.json|_report.md` — VG-Lite A100 全量配对结果。
+- `results/a100_hsd_spike_report.md` — HSD 报告（原始 jsonl 在远端 `STD_assets/results/`，本地未同步）。
+- 注：`results/` 已被 `.gitignore` 忽略，仅作本地/远端审计产物。
 
 ---
 
 ## 8. 未决问题 / 下一步
 
-1. **Dynamic STD >1× 的可行路径**（均超出「不做新算法」范围，需另行决策）：
+> **2026-09-17 更新**：第 2 条（Dynamic STD >1×）的前提已被 §14 的 A100 负结果动摇。**在 Video-MME 上 dynamic 连 acceptance 都低于 static**，因此当前第一优先级不是"如何加速"，而是"dynamic 的 accept 优势是否真实存在、在什么配置下存在"。详见 §16 的消融方案。
+
+1. **【最高优先级】复核 dynamic accept 优势**：VDC 正结果（4.73→6.40）与 A100/Video-MME 负结果（0.823→0.731–0.777）方向相反。需用配对、等 S_0、扩样本的消融区分「数据集差异」与「实现回归」（§14、§16）。
+2. **Dynamic STD >1× 的可行路径**（在 accept 优势被确认后才成立，均需另行决策）：
    - 降低 verify 的 q_len 或批量化（改 dense verification）；
    - 把 collector GEMM / refresh 放到独立 CUDA stream 与 verify 重叠；
    - 降低 visual KV 规模（降低 verify forward 本身）。
-2. **残余 5/10 greedy mismatch**：根因已定位为 batched q_len=γ+1 verification 的 reduction-order 数值差异。若要 token-level exact，需 `verify_mode="sequential"`（最慢）或在 near-tie 时回退（`verify_margin_threshold` / `verify_fallback`，`std_qwen25vl.py` 已备参数）。
-3. **下一算法阶段**（若继续）：EMA / predictive routing（当前明确不做）。
+3. **`verify_fallback` 的正确性未定**：它被用作 A100 上 6/6 exact 的保证，但 §12 的单样本显示它可能**引入** mismatch 并带来 ~2× verify 开销。需 ≥10 样本 A/B 后才可继续依赖。
+4. **残余 greedy mismatch**：根因是 batched q_len=γ+1 verification 的 reduction-order 数值差异。唯一 bit-exact 路径是 `verify_mode="sequential"`。
+5. **`sparse_verify_spike`（q_len>1 稀疏验证）尚未接入任何评测**，是唯一可能同时改善中间验证成本与 HSD 结构性开销的现成原语（§16）。
+6. **Adaptive-K / Adaptive-γ 已停在正确性门槛**：runtime Adaptive-γ 为 CORRECTNESS NO-GO，fixed-q sweep 也 NO-GO；重新开启需先解决 exactness。
+7. **下一算法阶段**（若继续）：EMA / predictive routing（当前明确不做）。
 
 ---
 
@@ -233,3 +266,176 @@
 **最终结论**：**NO-GO**。当前只证明 verification feedback 能产生变化的 K budget，未证明 Adaptive-K 在相同平均 budget 下提高实测 acceptance。按阶段门槛停止 runtime Adaptive-K；只有在另行授权多 K measured trace / static sweep 后才应重新评估。
 
 **产物**：`src/std_repro/adaptive_k_offline.py`、`scripts/analysis/simulate_adaptive_k.py`、`tests/test_adaptive_k_offline.py`、`tests/test_simulate_adaptive_k_cli.py`；本地报告位于 `results/adaptive_k_offline/`。
+
+---
+
+## 10. Adaptive-γ Phase 1：Offline Cost-Model Simulation（2026-08-24）— GO（仅 proxy）
+
+**目标**：只用已有 gamma=9 trace 与组件计时，判断"逐轮调节 γ"是否值得进入 runtime；新 decoding 运行数 = 0。
+
+**证据分级**：`measured`（记录的 γ=9 acceptance / 组件时间）、`replayed`（同轮内 γ≤9 前缀裁剪，不重建 generation context）、`proxy`（反事实轨迹、γ>9 外推、线性成本模型）、`optimistic_estimate`（零 controller overhead 的组件吞吐）。
+
+**结果**：
+
+| controller | mean γ | 接受长度 | accept rate | 估计 tokens/s | 相对效率 | 结论 |
+|---|---:|---:|---:|---:|---:|---|
+| fixed γ=9 | 9.000 | 4.732 | 0.520 | 17.53 | +0.00% | measured |
+| acceptance（primary） | 6.561 | 3.910 | 0.579 | 20.22 | +15.32% | proxy |
+| acceptance（conservative） | 6.386 | 3.727 | 0.570 | 20.05 | +14.38% | proxy |
+| cost_aware | 3.000 | 2.247 | 0.743 | 28.67 | +63.57% | replayed |
+
+- acceptance controller 是**唯一真正逐轮变化**的 controller（switch freq 0.368，无反转）；cost_aware 每轮都选 γ=3，等价于另一个 fixed-depth，其 +63.57% 不构成"动态"证据。
+- break-even controller overhead 估计：acceptance 0.0362 s/round；cost_aware 0.0715 s/round。
+- γ>9 的收益完全依赖未测的 tail `proxy`。
+
+**最终结论**：**GO（离线研究决策）**，但所有吞吐均为 `optimistic_estimate`，**不构成 runtime speedup 声明**。GO 只授权另行设计 runtime 实验。
+
+**产物**：`src/std_repro/adaptive_k_offline.py` 的 γ 扩展、`results/adaptive_gamma_offline/`（含 figure1/figure2）。
+
+---
+
+## 11. Adaptive-γ Runtime（2026-08-25）— CORRECTNESS NO-GO
+
+在 RTX A6000 / 4090 上跑 fixed γ=9 与 frozen Acceptance Adaptive γ∈{3,5,7,9}（及 capped9、fixed-q10）的配对比较。
+
+| 实验 | 配置 | 结果 |
+|---|---|---|
+| `adaptive_gamma_runtime` | γ∈{3..13}, q_len=γ+1 | **CORRECTNESS NO-GO** — fixed 与 adaptive 后缀不同 |
+| `adaptive_gamma_runtime_capped9` | γ∈{3,5,7,9}, physical q_len=10 | **CORRECTNESS NO-GO** — AR/Static/Adaptive exact gate FAIL |
+| `adaptive_gamma_fixed_q_sweep` | q=10..14，2 个已知 mismatch 样本 | **FIXED-Q NO-GO** — 无任何 q 能对所有已知样本 AR-exact（minimal shared q* = none） |
+
+关键观察：
+- γ 抖动导致 physical q_len 频繁变化，**padding 槽位从 0.71% 暴涨到 35.26%**（capped9，201/570），验证工作量被严重浪费。
+- capped9 上 adaptive 的 accept rate 反而更高（0.639 vs 0.572），但 mean accepted length 更低（3.51 vs 5.12），rounds 更多（57 vs 42）——**γ 变小并没有转化为更快的 wall-clock**。
+- 所有计时都标注为"仅审计、不可用于性能结论"（correctness gate 未过）。
+
+**最终结论**：Adaptive-γ 在**正确性门槛**上终止，从未进入可比较的性能阶段。
+
+**产物**：`results/adaptive_gamma_runtime/`、`results/adaptive_gamma_runtime_capped9/`、`results/adaptive_gamma_fixed_q_sweep*/`。
+
+---
+
+## 12. Verification Fallback 诊断（2026-09-05）— 存疑
+
+**背景**：§4 已定位残余 mismatch 来自 batched verification。`src/std_repro/verification_policy.py` 提供 `sequential_on_low_margin` 等回退策略，在 near-tie 时改走 q_len=1 的精确路径。9 月的 A100 实验把 `verify_fallback=sequential_on_low_margin` 作为 6/6 exact 的保证。
+
+**A6000 单样本（VDC `v_-6dz6tBH77I`, 96 帧, 256 tokens）对照**：
+
+| 配置 | static_token_match | mvp/opt_token_match | static fallback_count | static verify 时间 |
+|---|---|---:|---:|---:|
+| `verify_fallback=none` | **true** | true | 0 | 3.41s |
+| `verify_fallback=sequential_on_low_margin` | **false** | true | 11 | 6.16s |
+
+- 打开 fallback 后该样本的 static 反而 **mismatch**（true→false），且 verify 时间近乎翻倍。
+- Dynamic（mvp/opt）在两种配置下均为 match。
+
+**结论（存疑，非定论）**：样本量=1，不能据此否定 fallback；但说明"回退即保正确"的假设**尚未被验证**，且回退有显著 verify 开销。继续在 A100 上默认开启 fallback 之前，必须先做 ≥10 样本 A/B（见 §16）。
+
+**产物**：`results/correctness_fallback_a6000/`（注意 `vdc1_margin01.jsonl` 为空文件）、`tests/test_verification_fallback.py`。
+
+---
+
+## 13. ECNU Phase-8 部署（2026-09-05）— 事实完成
+
+**目标**：在 ECNU Phase-8 集群 `login2` 上准备代码、隔离 conda 环境、Qwen2.5-VL-7B-Instruct 与 Video-MME chunk 01，为后续 A100 实验做准备。
+
+**设计要点**（`docs/superpowers/specs/2026-09-05-ecnu-std-deployment-design.md`）：
+
+- 代码 `/public/home/xlwang/mcy/Project/STD`；环境 `/public/home/xlwang/mcy/conda_envs/specvlm`（Python 3.10 / torch 2.6.0+cu124 / transformers 4.48.0）；资产 `/public/home/xlwang/mcy/STD_assets/{models,datasets,cache,results}`。
+- 只下载 Video-MME chunk 01；不在部署阶段连 GPU 节点。
+
+**状态**：**事实已完成**。§14 所有 A100 运行的 manifest 均指向 `STD_assets` 下的模型与数据路径，证明环境/模型/数据已跑通；但 `.spec-workflow/` 的 plan 复选框与 approvals 未更新，**部署记录与代码库脱节**。执行脚本/记录待补。
+
+---
+
+## 14. Dynamic STD-VG Lite on A100 / Video-MME（2026-09-09）— ❌ 负结果 ★
+
+**目标**：按 `docs/superpowers/plans/2026-09-09-dynamic-std-vg-lite.md` 实现并评测 verifier-guided dynamic STD 的低风险部分（two-query collector、selection update interval/hysteresis、attention-free bootstrap），在保持 exact 的前提下寻找 wall-clock 收益。
+
+**实现**（commit 前为工作区改动，见 §16 的入库说明）：
+
+- `verification_query_positions(..., mode="two"|"three")`：two = 首 query + bonus query；three = 旧控制组（含 lookahead）。
+- `should_refresh_selection(round_id, changed_ratio, interval, min_changed_ratio)`：控制更新频率与滞回。
+- `attention_free_visual_topk(keys, values, ...)`：无注意力 bootstrap（windowed centroid residual + value norm + coverage）。
+- 主循环新增 `selection_update_interval` / `min_selection_change_ratio` / `query_mode` / `bootstrap_mode`，并把默认值从 **v1+full 改为 v2+incremental**。
+- 修复 refresh 子计时重复计数（报告中的 `refresh_timing_note`）。
+
+**结果**（gpu23 物理 GPU1，Video-MME 3 样本 seed-42，128 帧，128/256 tokens，repeats=2，**从 `*_profile.jsonl` 的 `measure` 阶段重新聚合**）：
+
+| 实验 | static accept | dynamic accept | static decode | dynamic decode | vs static | exact |
+|---|---:|---:|---:|---:|---:|---:|
+| q2_profile3（query=two, interval=1） | **0.823** | 0.762 | 33.69s | 40.75s | 0.827× | 6/6 |
+| interval4_profile（i=4, attention） | **0.823** | 0.777 | 33.49s | 37.85s | 0.885× | 6/6 |
+| bootstrap_windowed（attention_free） | **0.823** | 0.731 | 32.95s | 40.78s | 0.808× | 6/6 |
+| v2_i1_final | **0.823** | 0.762 | 34.39s | 41.78s | 0.823× | 6/6 |
+| v2_i1_t256 | **0.857** | 0.797 | 63.20s | 79.61s | 0.794× | 6/6 |
+| f128_t128_r2（v1/v3） | **0.823** | 0.751 | 32.57s | 47.8/48.3s | 0.68/0.68× | 6/6 |
+
+**核心发现**：
+
+1. **static 的 acceptance 全面高于所有 dynamic 变体**，decode 也全面更慢。这与 §3 的 VDC 结果（static 0.531 → dynamic 0.719）**方向相反**。
+2. 6/6 exact 达成，但依赖 `verify_fallback=sequential_on_low_margin`——而 §12 显示该 fallback 本身正确性存疑。
+3. 组件计时显示 dynamic 的额外开销落在 **draft+verify**（static draft 10.15s/verify 5.51s vs dynamic 10.91s/5.71s），而非 selection/collect（~0.027s）。
+4. 该数据集的 **static accept 本身就很高（0.823）**，与 VDC（0.531）不在同一区间——这可能是"动态收益消失"的根因，也可能是 3 样本方差。
+
+**候选解释（尚未被实验区分）**：
+- (H1) **incremental refresh** 的 slot 顺序回归（§5 Task 2 已在 VDC 证明会降 accept），而 A100 默认开 incremental；
+- (H2) **attention-free bootstrap** 产生劣于 static 的 S_0（attention_free 变体确实最差）；
+- (H3) **v2 two-query collector** 的 query 选择劣于 three；
+- (H4) Video-MME/CoT/128 帧下 `TopK(A_{t-1})` 信号本身失效（真实负结果）；
+- (H5) 3 样本方差。
+
+**结论**：在 `limit=3` 上 **declared negative**。按 §16 的消融方案扩样本复核前，不得声称 dynamic 有收益。
+
+**产物**：`results/a100_dynamic_20260909_*.jsonl|_summary.json|_report.md`（`results/` 已被 gitignore，未入库）。
+
+---
+
+## 15. HSD（嵌套投机）Spike（2026-09-09）— ❌ 负结果
+
+**目标**：验证 D（3B draft）→ Sparse（7B compact cache 逐个打分）→ Dense（7B canonical batched verify）的嵌套级联是否可用且更快。
+
+**配置**：Qwen2.5-VL-7B target + Qwen2.5-VL-3B draft，Video-MME `050-1`/`496-3`/`717-1`，32 帧，64 tokens，repeats=2。
+
+| method | decode（s, mean） | inference（s, mean） | exact vs AR |
+|---|---:|---:|---:|
+| AR（7B dense） | 1.640 | 3.508 | reference |
+| static STD（7B sparse→dense） | **1.897** | 3.822 | 6/6 |
+| small dense（3B→7B dense） | 5.967 | 9.509 | 6/6 |
+| HSD spike（3B→7B sparse→7B dense） | 5.227 | 8.874 | 6/6 |
+
+- HSD 比 static STD **慢 2.76×（decode）/ 2.32×（inference）**，比 AR 慢 3.19× / 2.53×。
+- 全部 6/6 exact，说明嵌套验证路径**功能正确**，但**结构上不划算**：3B draft + 中间稀疏验证 = 两次额外模型前向；当前稀疏验证仍有 per-block launch/cache 管理开销。
+
+**结论**：负结果，不建议继续此形态。若要做快，需要真正更便宜的中间验证器（独立 slim 模型/子网络）和/或重叠调度，而不是简单插入稀疏注意力。
+
+**产物**：`src/std_repro/hsd_spike.py`、`scripts/benchmark_a100_hsd_spike.py`、`tests/test_hsd_spike*.py`、`results/a100_hsd_spike_report.md`（原始 `a100_hsd_spike_20260909_l3.jsonl` 在远端 `STD_assets/results/`，本地未同步）。
+
+---
+
+## 16. 在研原语与消融复跑方案（2026-09-17）
+
+### 16.1 在研原语（未接入评测）
+
+- `src/std_repro/sparse_verify_spike.py` — q_len>1 的 offset-causal 稀疏验证（整块验证，避免未来泄漏）。**只有单元测试，未接入任何 benchmark。** 这是唯一可能同时改善"中间验证成本"与 HSD 结构性开销的现成 primitive，优先级高。
+- `src/std_repro/streaming_video.py` — PyAV 流式抽帧，内存有界（替代 torchvision 全量解码），已被 A100 benchmark 使用。
+
+### 16.2 消融复跑方案
+
+**动机**：§14 的负结果可能是实现回归（H1–H3），也可能是真实负结果（H4），而 `limit=3` 无法区分（H5）。
+
+**方案**：固定 static 作 control，**逐轴消融** + **扩样本复核**。完整设计、命令矩阵与判定门槛见：
+`docs/superpowers/plans/2026-09-17-dynamic-std-ablation-rerun.md`，配套脚本 `scripts/run_a100_ablation.sh`。
+
+核心思路：
+1. 先做 **1 个变量的干净对照**：`refresh=full` vs `incremental`、`bootstrap=attention` vs `attention_free`、`query=three` vs `two`，全部在 `limit=10` 上跑。
+2. 若任一配置的 dynamic accept ≥ static，则说明是回归，继续定位；若全部 < static，则 H4 成立，dynamic 主线应转为负结果归档。
+3. 同时做 `verify_fallback` A/B（§12），确定 6/6 exact 是否可以脱离 fallback 成立。
+4. 全程只使用物理 GPU1，绝不触碰 GPU0（vLLM 工作负载）。
+
+### 16.3 工程状态（2026-09-17）
+
+- §14/§15 的实现此前**未入库**；本次已把核心代码、脚本与测试提交（见 git log）。
+- `.spec-workflow/`（第三方 spec 工具模板，644 行样板）已加入 `.gitignore`，不入库。
+- 本地 `python3` 为 3.8，`tests/test_hsd_spike.py` 会因 `src/specvlm/models/modeling_rope_utils.py:97` 的 PEP 585 `tuple[...]` 报 3 个失败；项目 pin 的是 Python 3.10，**非代码缺陷**。带 `PYTHONPATH=src` 时其余 58 passed / 6 skipped。
+
