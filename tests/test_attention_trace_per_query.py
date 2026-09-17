@@ -164,9 +164,16 @@ class TestVideoMmeIterator:
         std.std_generate_qwen25vl = lambda *a, **k: None
         std.set_trace_collector = lambda *a, **k: None
         monkeypatch.setitem(sys.modules, "std_repro.std_qwen25vl", std)
+
+        # collect_traces installs the STD streaming reader (also an `av` user).
+        stream = types.ModuleType("std_repro.streaming_video")
+        stream.install_streaming_video_reader = lambda: None
+        monkeypatch.setitem(sys.modules, "std_repro.streaming_video", stream)
+
         import std_repro
 
         monkeypatch.setattr(std_repro, "std_qwen25vl", std, raising=False)
+        monkeypatch.setattr(std_repro, "streaming_video", stream, raising=False)
 
         if "collect_traces" in sys.modules:
             return importlib.reload(sys.modules["collect_traces"]), calls

@@ -66,6 +66,7 @@ from benchmark_std import (  # noqa: E402
     make_qwen_video_inputs,
 )
 from std_repro.std_qwen25vl import std_generate_qwen25vl, set_trace_collector  # noqa: E402
+from std_repro.streaming_video import install_streaming_video_reader  # noqa: E402
 from attention_trace import AttentionTraceCollector  # noqa: E402
 
 
@@ -166,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
+    # Match benchmark_a100_dynamic.py exactly: the STD streaming PyAV reader
+    # bounds decoder memory and avoids qwen_vl_utils' torchvision fallback
+    # (which references the removed `av.AVError` on av>=14). It also makes the
+    # sampled frames identical to the runs this analysis is compared against.
+    install_streaming_video_reader()
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     meta_path = out_dir / f"{args.dataset}_frame{args.frame_num}.jsonl"
@@ -179,8 +186,10 @@ def main() -> None:
     elif args.dataset == "MLVU":
         samples = list(iter_mlvu_samples(args.data_dir, args.limit))
     else:
-        data_path = args.data_path or args.data_dir
-        video_root = args.video_root or data_path
+        # Absolute paths: qwen_vl_utils turns a relative path into a
+        # `file://relative/...` URI that av cannot open.
+        data_path = str(Path(args.data_path or args.data_dir).resolve())
+        video_root = str(Path(args.video_root or data_path).resolve())
         samples = list(
             iter_videomme_samples(data_path, video_root, args.limit, args.prompt_style)
         )

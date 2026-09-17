@@ -69,7 +69,14 @@ def load_meta(meta_path: Path) -> list:
 def analyze_sample(meta: dict, traces_dir: Path) -> dict:
     payload = torch.load(traces_dir / f"{meta['sample_id']}.pt", map_location="cpu", weights_only=True)
     r0 = payload["prefill_scores"].float().mean(dim=0).numpy()          # [visual_len]
-    R = payload["round_scores"].float().mean(dim=1).numpy()             # [num_rounds, visual_len]
+    rounds = payload["round_scores"]
+    if torch.is_tensor(rounds):
+        # Summed convention: [num_rounds, kv_heads, visual_len].
+        R = rounds.float().mean(dim=1).numpy()                          # [num_rounds, visual_len]
+    else:
+        # Per-query convention from --record-per-query: reduce each round to the
+        # summed (V1) scores first so the Oracle Study convention is unchanged.
+        R = torch.stack([r.float().sum(dim=1) for r in rounds], dim=0).mean(dim=1).numpy()
     T = R.shape[0]
     k = meta["k"]
     S0 = topk_indices(r0, k)
