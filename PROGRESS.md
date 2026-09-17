@@ -452,7 +452,9 @@
 1. **问题重构**：不再问"dynamic 有没有用"（二元、不可证伪），而是问"**在什么可测条件下有用，能否先验预测**"——产出 `Δaccept ≈ f(特征)` 与启用判据。
 2. **分层执行**：**L0 仪表不变量**（选择/cache 一致性、equal-S_0、更新比例、计时修复、禁止默认值漂移）→ **L1 离线机制分析**（在 **Video-MME** 上重做 Oracle Study——此前只在 VDC+MLVU 做过；并用同一份 attention 做 all/two/three-query 估计质量消融）→ **L2 分层受控在线消融**（等 S_0、单变量、n≥20、3 seeds、逐样本配对 + 按 `static_accept` 分箱）→ **L3 wall-clock**。
 3. **预注册判读**：给出 5 条观察→结论→行动的对照表，禁止事后解释；**禁止用未分层均值下结论**。
-4. **第一步**：L1.1 —— 在 Video-MME 采一次 trace 算 recall。不改算法、无正确性风险，GPU 被占用时也可优先排期。
+4. **执行状态（2026-09-17）**：方案已定稿并**锁定 A100/gpu23 物理 GPU1**，但**当前两张卡均被占用**（GPU0 vLLM、GPU1 他人作业），故暂停执行、等待放卡。
+5. **执行前置（阶段 A，可先做，不占 GPU）**：`collect_traces.py` 目前**只支持 VDC/MLVU 且路径写死本机** `mnt/local2`，在 A100 上跑不了；需先关闭 G1–G6 代码缺口（Video-MME 迭代器、per-query trace 记录、分箱分析、L0 仪表、分层汇总），详见方案 §6。
+6. **第一步（放卡后）**：阶段 B —— 在 Video-MME 采 20 样本 trace（~1–2h）→ 阶段 C 离线算 recall（门槛 G-L1：`recall(Previous)−recall(Static) ≥ +0.05` 且增益集中在低 headroom 分箱）。
 
 旧的 `docs/superpowers/plans/2026-09-17-dynamic-std-ablation-rerun.md` + `scripts/run_a100_ablation.sh` 仍可用作 L2 的执行载体，但**判读以新方案为准**。
 
