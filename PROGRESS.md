@@ -224,9 +224,10 @@
 
 ## 8. 未决问题 / 下一步
 
-> **2026-09-17 更新**：第 2 条（Dynamic STD >1×）的前提已被 §14 的 A100 负结果动摇。**在 Video-MME 上 dynamic 连 acceptance 都低于 static**，因此当前第一优先级不是"如何加速"，而是"dynamic 的 accept 优势是否真实存在、在什么配置下存在"。详见 §16 的消融方案。
+> **2026-09-17 更新**：第 2 条（Dynamic STD >1×）的前提已被 §14 的 A100 负结果动摇。**在 Video-MME 上 dynamic 连 acceptance 都低于 static**，因此当前第一优先级不是"如何加速"，而是"dynamic 的 accept 优势是否真实存在、在什么条件下存在"。
+> **同日补充**：硬件分档（`docs/experiment-provenance.md`）显示正结果在 **A6000**、负结果在 **A100**，且两者间同时有 4 个变量不同；逐轮诊断又显示 **Δaccept 与 static 剩余空间单调相关**（H_headroom）。因此判读框架升级为 `docs/superpowers/plans/2026-09-17-dynamic-routing-thorough-analysis.md`（L0 仪表 → L1 离线机制 → L2 分层受控 → L3 wall-clock）。
 
-1. **【最高优先级】复核 dynamic accept 优势**：VDC 正结果（4.73→6.40）与 A100/Video-MME 负结果（0.823→0.731–0.777）方向相反。需用配对、等 S_0、扩样本的消融区分「数据集差异」与「实现回归」（§14、§16）。
+1. **【最高优先级】在 Video-MME 上做机制分析（L1）**：VDC 正结果（4.73→6.40）与 A100/Video-MME 负结果（0.823→0.731–0.777）方向相反，且从未在 Video-MME 上做过 Oracle Study。先采 trace 算 Static/Previous/Oracle 的 recall，**按 static 剩余空间分箱**——这一步不改算法、无正确性风险，决定后续是否值得投入（§14、§16、`experiment-provenance.md`）。
 2. **Dynamic STD >1× 的可行路径**（在 accept 优势被确认后才成立，均需另行决策）：
    - 降低 verify 的 q_len 或批量化（改 dense verification）；
    - 把 collector GEMM / refresh 放到独立 CUDA stream 与 verify 重叠；
@@ -374,6 +375,8 @@
 | v2_i1_t256 | **0.857** | 0.797 | 63.20s | 79.61s | 0.794× | 6/6 |
 | f128_t128_r2（v1/v3） | **0.823** | 0.751 | 32.57s | 47.8/48.3s | 0.68/0.68× | 6/6 |
 
+**⚠️ 硬件归属（2026-09-17 补记，详见 `docs/experiment-provenance.md`）**：本节的**负结果全部来自 A100/gpu23**；而 §3 的 **dynamic 正结果（+1.66）来自 A6000/4090 本机**。两者之间同时变了 **4 个变量**（硬件 A6000→A100、数据集 VDC→Video-MME、生成长度 256→128、collector/refresh `v1+full`→`v2+incremental`），因此「dynamic 行不行」**至今没有被干净地回答过一次**。A100 运行所用代码与当前代码逐文件 sha256 一致（6/6 SAME），故负结果**不是**旧版缺 slot-map 修复所致。
+
 **核心发现**：
 
 1. **static 的 acceptance 全面高于所有 dynamic 变体**，decode 也全面更慢。这与 §3 的 VDC 结果（static 0.531 → dynamic 0.719）**方向相反**。
@@ -381,14 +384,28 @@
 3. 组件计时显示 dynamic 的额外开销落在 **draft+verify**（static draft 10.15s/verify 5.51s vs dynamic 10.91s/5.71s），而非 selection/collect（~0.027s）。
 4. 该数据集的 **static accept 本身就很高（0.823）**，与 VDC（0.531）不在同一区间——这可能是"动态收益消失"的根因，也可能是 3 样本方差。
 
+**⚠️ 逐轮诊断（2026-09-17 新提取，此前只报均值）**：从 `dynamic_stats.per_round` 还原出每轮真实行为：
+
+| 样本 | rounds | static acc | dyn acc | **Δ** | Jaccard(S_t,S_{t+1}) | 每轮替换 token（K=996） | update_applied |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 050-1 | 19 | 0.623 | 0.667 | **+0.044** | 0.536 | 301.7（30%） | 19/19 |
+| 496-3 | 17 | 0.864 | 0.762 | **−0.102** | 0.510 | 320.3（32%） | 17/17 |
+| 717-1 | 15 | 0.983 | 0.857 | **−0.126** | 0.524 | 298.4（30%） | 15/15 |
+
+- interval=1 时**确实每轮都在改选择**，每轮替换约 **30%** 的 visual KV，相邻轮 Jaccard≈0.52。
+- interval=4 时 `update_applied` 仅 **5/23、3/14、3/15**——节流强度远超预期。
+- **Δaccept 与 static 的"剩余空间"单调相关**（VDC 0.531→+0.188；050-1 0.623→+0.044；496-3 0.864→−0.102；717-1 0.983→−0.126）。
+- **n=3 的均值 −0.061 完全掩盖了这个分化。** 这是 §16.2 新方案的核心命题 **H_headroom**。
+
 **候选解释（尚未被实验区分）**：
+- **(H_headroom，主假设)** static 接近最优时，每轮 30% 的 KV 替换是纯噪声；static 远离最优时才有增益；
 - (H1) **incremental refresh** 的 slot 顺序回归（§5 Task 2 已在 VDC 证明会降 accept），而 A100 默认开 incremental；
 - (H2) **attention-free bootstrap** 产生劣于 static 的 S_0（attention_free 变体确实最差）；
 - (H3) **v2 two-query collector** 的 query 选择劣于 three；
 - (H4) Video-MME/CoT/128 帧下 `TopK(A_{t-1})` 信号本身失效（真实负结果）；
 - (H5) 3 样本方差。
 
-**结论**：在 `limit=3` 上 **declared negative**。按 §16 的消融方案扩样本复核前，不得声称 dynamic 有收益。
+**结论**：在 `limit=3` 上 **declared negative**。**但判读框架已由 `docs/superpowers/plans/2026-09-17-dynamic-routing-thorough-analysis.md` 取代**：先过仪表不变量（L0）、先在 Video-MME 上做机制分析（L1），再做分层受控消融（L2），且**禁止用未分层均值下结论**。
 
 **产物**：`results/a100_dynamic_20260909_*.jsonl|_summary.json|_report.md`（`results/` 已被 gitignore，未入库）。
 
@@ -416,29 +433,35 @@
 
 ---
 
-## 16. 在研原语与消融复跑方案（2026-09-17）
+## 16. 在研原语与彻底分析方案（2026-09-17）
 
 ### 16.1 在研原语（未接入评测）
 
 - `src/std_repro/sparse_verify_spike.py` — q_len>1 的 offset-causal 稀疏验证（整块验证，避免未来泄漏）。**只有单元测试，未接入任何 benchmark。** 这是唯一可能同时改善"中间验证成本"与 HSD 结构性开销的现成 primitive，优先级高。
 - `src/std_repro/streaming_video.py` — PyAV 流式抽帧，内存有界（替代 torchvision 全量解码），已被 A100 benchmark 使用。
 
-### 16.2 消融复跑方案
+### 16.2 消融复跑方案 → 已升级为「彻底分析方案」
 
-**动机**：§14 的负结果可能是实现回归（H1–H3），也可能是真实负结果（H4），而 `limit=3` 无法区分（H5）。
+**动机**：§14 的负结果可能是实现回归（H1–H3）、也可能是真实负结果（H4），而 `limit=3` 无法区分（H5）；更关键的是 §14 新提取的逐轮诊断显示 **Δaccept 与 static 剩余空间单调相关**（H_headroom），而均值掩盖了它。
 
-**方案**：固定 static 作 control，**逐轴消融** + **扩样本复核**。完整设计、命令矩阵与判定门槛见：
-`docs/superpowers/plans/2026-09-17-dynamic-std-ablation-rerun.md`，配套脚本 `scripts/run_a100_ablation.sh`。
+**当前方案（取代旧消融矩阵的判读框架）**：
+`docs/superpowers/plans/2026-09-17-dynamic-routing-thorough-analysis.md`
 
-核心思路：
-1. 先做 **1 个变量的干净对照**：`refresh=full` vs `incremental`、`bootstrap=attention` vs `attention_free`、`query=three` vs `two`，全部在 `limit=10` 上跑。
-2. 若任一配置的 dynamic accept ≥ static，则说明是回归，继续定位；若全部 < static，则 H4 成立，dynamic 主线应转为负结果归档。
-3. 同时做 `verify_fallback` A/B（§12），确定 6/6 exact 是否可以脱离 fallback 成立。
-4. 全程只使用物理 GPU1，绝不触碰 GPU0（vLLM 工作负载）。
+核心变化：
+
+1. **问题重构**：不再问"dynamic 有没有用"（二元、不可证伪），而是问"**在什么可测条件下有用，能否先验预测**"——产出 `Δaccept ≈ f(特征)` 与启用判据。
+2. **分层执行**：**L0 仪表不变量**（选择/cache 一致性、equal-S_0、更新比例、计时修复、禁止默认值漂移）→ **L1 离线机制分析**（在 **Video-MME** 上重做 Oracle Study——此前只在 VDC+MLVU 做过；并用同一份 attention 做 all/two/three-query 估计质量消融）→ **L2 分层受控在线消融**（等 S_0、单变量、n≥20、3 seeds、逐样本配对 + 按 `static_accept` 分箱）→ **L3 wall-clock**。
+3. **预注册判读**：给出 5 条观察→结论→行动的对照表，禁止事后解释；**禁止用未分层均值下结论**。
+4. **第一步**：L1.1 —— 在 Video-MME 采一次 trace 算 recall。不改算法、无正确性风险，GPU 被占用时也可优先排期。
+
+旧的 `docs/superpowers/plans/2026-09-17-dynamic-std-ablation-rerun.md` + `scripts/run_a100_ablation.sh` 仍可用作 L2 的执行载体，但**判读以新方案为准**。
+
+**硬件分档记录**：`docs/experiment-provenance.md`（A6000 vs A100 逐条结果 + 逐轮诊断 + 7 个混淆）。
 
 ### 16.3 工程状态（2026-09-17）
 
 - §14/§15 的实现此前**未入库**；本次已把核心代码、脚本与测试提交（见 git log）。
 - `.spec-workflow/`（第三方 spec 工具模板，644 行样板）已加入 `.gitignore`，不入库。
 - 本地 `python3` 为 3.8，`tests/test_hsd_spike.py` 会因 `src/specvlm/models/modeling_rope_utils.py:97` 的 PEP 585 `tuple[...]` 报 3 个失败；项目 pin 的是 Python 3.10，**非代码缺陷**。带 `PYTHONPATH=src` 时其余 58 passed / 6 skipped。
+- **A100 免密访问**已配好（`ssh a100` / `ssh a100-gpu`），见 `docs/a100-access.md` 与 `scripts/a100.sh`。
 
