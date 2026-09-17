@@ -346,6 +346,9 @@
 
 **状态**：**事实已完成**。§14 所有 A100 运行的 manifest 均指向 `STD_assets` 下的模型与数据路径，证明环境/模型/数据已跑通；但 `.spec-workflow/` 的 plan 复选框与 approvals 未更新，**部署记录与代码库脱节**。执行脚本/记录待补。
 
+**访问方式**：连接拓扑、远端路径、GPU 规约与故障排查已固化为 `docs/a100-access.md`，配套可复用脚本 `scripts/a100.sh`（`login` / `gpu` / `status` / `push` / `pull` / `setup-key` / `close` / `ablation`）。链路为 `本机 --ssh -p 2323 xlwang@59.78.189.133--> login2 --ssh--> gpu23(10.11.200.23)`；gpu23 上 **GPU0 常驻 vLLM，只用 GPU1**。两个产物均不含任何凭证。
+
+
 ---
 
 ## 14. Dynamic STD-VG Lite on A100 / Video-MME（2026-09-09）— ❌ 负结果 ★
