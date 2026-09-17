@@ -68,6 +68,9 @@ class GenerateResult:
     gamma_history: List[int] = field(default_factory=list)
     proposed_lengths: List[int] = field(default_factory=list)
     accept_lengths: List[int] = field(default_factory=list)
+    # len(dense_pending) at each verification call, so the exact query positions
+    # used by the two/three-query collectors can be reconstructed offline.
+    pending_lengths: List[int] = field(default_factory=list)
     draft_time: float = 0.0
     verify_time: float = 0.0
     bonus_time: float = 0.0
@@ -742,6 +745,7 @@ def std_generate_qwen25vl(
     proposed_total = 0
     accept_lengths: List[int] = []
     proposed_lengths: List[int] = []
+    pending_lengths: List[int] = []
     gamma_history: List[int] = []
     dense_pending: List[int] = []
     draft_time = 0.0
@@ -781,6 +785,11 @@ def std_generate_qwen25vl(
         draft_time += _profile_mark(profile_decode) - stage_start
         proposed_total += len(draft)
         proposed_lengths.append(len(draft))
+        # Carried-over prefix length at verification time. Recorded so offline
+        # analysis can reconstruct the exact query positions that the
+        # verifier-guided collectors would have selected
+        # (see scripts/analysis/analyze_collector_ablation.py).
+        pending_lengths.append(len(dense_pending))
 
         stage_start = _profile_mark(profile_decode)
         if verify_mode == "parallel":
@@ -954,6 +963,7 @@ def std_generate_qwen25vl(
         gamma_history=gamma_history,
         proposed_lengths=proposed_lengths,
         accept_lengths=accept_lengths,
+        pending_lengths=pending_lengths,
         draft_time=draft_time,
         verify_time=verify_time,
         bonus_time=bonus_time,

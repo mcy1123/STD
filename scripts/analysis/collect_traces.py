@@ -12,9 +12,25 @@ The collector is a pure pass-through hook (attribute lookup); it never changes
 logits/KV/backend, so the frozen correctness baseline is preserved.
 
 Usage:
+  # VideoDetailCaption / MLVU (local paths)
   python scripts/analysis/collect_traces.py \
     --dataset VideoDetailCaption --data-dir /mnt/local2/mcy/datasets/VideoDetailCaption \
     --frame-num 128 --max-new-tokens 256 --gamma 9 --limit 10 --gpu 0
+
+  # Video-MME on the A100 (see docs/superpowers/plans/2026-09-17-dynamic-routing-thorough-analysis.md)
+  CUDA_VISIBLE_DEVICES=1 python scripts/analysis/collect_traces.py \
+    --dataset Video-MME \
+    --data-path  /public/home/xlwang/mcy/STD_assets/datasets/Video-MME \
+    --video-root /public/home/xlwang/mcy/STD_assets/datasets/Video-MME/videos \
+    --model-path /public/home/xlwang/mcy/STD_assets/models/Qwen2.5-VL-7B-Instruct \
+    --frame-num 128 --max-new-tokens 256 --gamma 9 --k-plus-text 1024 \
+    --limit 20 --record-per-query --prompt-style cot \
+    --output-dir /public/home/xlwang/mcy/STD_assets/results/routing_traces_videomme
+
+`--record-per-query` keeps the verification-round query axis so that
+all/two/three-query collectors can be compared offline
+(`scripts/analysis/analyze_collector_ablation.py`). The prefill trace is always
+summed over queries.
 """
 
 from __future__ import annotations
@@ -43,7 +59,12 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import pandas as pd  # noqa: E402
 
-from benchmark_std import load_qwen_model, make_qwen_video_inputs, VIDEO_TOKEN_ID  # noqa: E402
+from benchmark_std import (  # noqa: E402
+    VIDEO_TOKEN_ID,
+    iter_generic_hf_video,
+    load_qwen_model,
+    make_qwen_video_inputs,
+)
 from std_repro.std_qwen25vl import std_generate_qwen25vl, set_trace_collector  # noqa: E402
 from attention_trace import AttentionTraceCollector  # noqa: E402
 
@@ -82,11 +103,47 @@ def iter_mlvu_samples(data_dir: str, limit: int):
             break
 
 
-def main() -> None:
+def iter_videomme_samples(data_path: str, video_root: str, limit: int, prompt_style: str = "cot"):
+    """Video-MME samples, matching the A100 benchmark's seed-42 ordering.
+
+    Reuses `benchmark_std.iter_generic_hf_video` so trace collection sees the
+    exact same samples, prompt style and video resolution as
+    `benchmark_a100_dynamic.py`.
+    """
+    yield from iter_generic_hf_video(
+        data_path, "test", limit, video_root, prompt_style=prompt_style
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default="/mnt/local2/mcy/models/Qwen2.5-VL-7B-Instruct")
-    parser.add_argument("--dataset", choices=["VideoDetailCaption", "MLVU"], default="VideoDetailCaption")
-    parser.add_argument("--data-dir", default="/mnt/local2/mcy/datasets/VideoDetailCaption")
+    parser.add_argument(
+        "--dataset",
+        choices=["VideoDetailCaption", "MLVU", "Video-MME"],
+        default="VideoDetailCaption",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default="/mnt/local2/mcy/datasets/VideoDetailCaption",
+        help="VideoDetailCaption / MLVU dataset root.",
+    )
+    parser.add_argument(
+        "--data-path",
+        default=None,
+        help="Video-MME dataset root (HF dataset dir). Defaults to --data-dir.",
+    )
+    parser.add_argument(
+        "--video-root",
+        default=None,
+        help="Video-MME video directory. Defaults to --data-path.",
+    )
+    parser.add_argument(
+        "--prompt-style",
+        choices=["direct", "cot"],
+        default="cot",
+        help="Prompt style for Video-MME (must match the benchmark).",
+    )
     parser.add_argument("--frame-num", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--gamma", type=int, default=9)
@@ -95,7 +152,19 @@ def main() -> None:
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--output-dir", default=str(ROOT / "results" / "routing_traces"))
     parser.add_argument("--resume", action="store_true", help="Skip samples whose .pt trace already exists.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--record-per-query",
+        action="store_true",
+        help=(
+            "Keep the query axis on verification rounds ([kv_heads, q_len, visual_len]) so that "
+            "all/two/three-query collectors can be compared offline. Prefill stays summed."
+        ),
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -107,8 +176,14 @@ def main() -> None:
 
     if args.dataset == "VideoDetailCaption":
         samples = list(iter_vdc_samples(args.data_dir, args.limit))
-    else:
+    elif args.dataset == "MLVU":
         samples = list(iter_mlvu_samples(args.data_dir, args.limit))
+    else:
+        data_path = args.data_path or args.data_dir
+        video_root = args.video_root or data_path
+        samples = list(
+            iter_videomme_samples(data_path, video_root, args.limit, args.prompt_style)
+        )
     print(f"Dataset={args.dataset}  samples={len(samples)}  frame_num={args.frame_num}", flush=True)
 
     with meta_path.open("w", encoding="utf-8") as meta_f:
@@ -127,7 +202,9 @@ def main() -> None:
             visual_positions = torch.nonzero(prompt_ids == VIDEO_TOKEN_ID, as_tuple=False).flatten().cpu()
             visual_len = int(visual_positions.numel())
 
-            collector = AttentionTraceCollector(model, visual_positions)
+            collector = AttentionTraceCollector(
+                model, visual_positions, record_per_query=args.record_per_query
+            )
             collector.install()
             set_trace_collector(collector)
             try:
@@ -148,13 +225,21 @@ def main() -> None:
                 raise RuntimeError(
                     f"Round count mismatch: collector={len(collector.rounds)} result={result.decode_rounds}"
                 )
-            round_scores = torch.stack([r.visual_scores for r in collector.rounds], dim=0)
             query_lens = [r.query_len for r in collector.rounds]
+            if args.record_per_query:
+                # q_len varies per round (pending + propose), so the rounds
+                # cannot be stacked into one tensor.
+                round_scores = [r.visual_scores.float() for r in collector.rounds]
+            else:
+                round_scores = torch.stack(
+                    [r.visual_scores for r in collector.rounds], dim=0
+                ).float()
 
             payload = {
                 "prefill_scores": prefill.float(),
-                "round_scores": round_scores.float(),
+                "round_scores": round_scores,
                 "query_lens": torch.tensor(query_lens, dtype=torch.long),
+                "per_query": bool(args.record_per_query),
             }
             torch.save(payload, out_dir / f"{s['sample_id']}.pt")
 
@@ -173,8 +258,25 @@ def main() -> None:
                 "generate_len": result.generate_len,
                 "accept_lengths": result.accept_lengths,
                 "query_lens": query_lens,
+                "proposed_lengths": result.proposed_lengths,
+                "pending_lengths": result.pending_lengths,
                 "mean_accept_length": result.mean_accept_length,
+                "per_query": bool(args.record_per_query),
+                "prompt_style": args.prompt_style if args.dataset == "Video-MME" else None,
             }
+            # q_len must equal pending + proposed; otherwise the offline collector
+            # ablation cannot reconstruct the exact query positions.
+            if len(result.pending_lengths) == len(query_lens) == len(result.proposed_lengths):
+                mismatched = [
+                    i
+                    for i in range(len(query_lens))
+                    if query_lens[i] != result.pending_lengths[i] + result.proposed_lengths[i]
+                ]
+                if mismatched:
+                    raise RuntimeError(
+                        f"query_len != pending + proposed at rounds {mismatched[:5]} "
+                        f"for {s['sample_id']}; collector ablation would be invalid."
+                    )
             meta_f.write(json.dumps(meta, ensure_ascii=False) + "\n")
             meta_f.flush()
 

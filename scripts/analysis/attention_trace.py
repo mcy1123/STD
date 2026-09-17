@@ -10,6 +10,12 @@ visual-only relevance score (visual softmax attention mass, layer-mean, summed
 over query positions). It never materializes a full
 `[num_heads, q_len, full_context]` attention matrix and never keeps per-layer
 per-round tensors, so memory stays O(num_kv_heads * visual_len) per round.
+
+With `record_per_query=True` the *verification rounds* keep the query axis
+(`[num_kv_heads, q_len, visual_len]`) so that query-subset collectors
+(all / two / three-query) can be compared offline. The prefill trace is always
+summed over queries: its q_len is the whole prompt, so a per-query copy would be
+orders of magnitude larger and is not needed by any analysis.
 """
 
 from __future__ import annotations
@@ -25,9 +31,12 @@ class RoundTrace:
     """One dense-verification round's aggregated visual relevance."""
 
     round_id: int
-    # Cross-layer mean relevance: [num_kv_heads, visual_len] (cpu fp32).
+    # Cross-layer mean relevance (cpu fp32). Shape is [num_kv_heads, visual_len]
+    # by default, or [num_kv_heads, query_len, visual_len] when the collector
+    # was constructed with record_per_query=True.
     visual_scores: torch.Tensor
     query_len: int = 0
+    per_query: bool = False
 
 
 class AttentionTraceCollector:
@@ -38,12 +47,13 @@ class AttentionTraceCollector:
     decode round's A_t relevance.
     """
 
-    def __init__(self, model, visual_positions: torch.Tensor):
+    def __init__(self, model, visual_positions: torch.Tensor, record_per_query: bool = False):
         self.model = model
         # CPU long tensor: actual KV indices of visual tokens in the dense cache.
         self.visual_positions = visual_positions
         self.visual_len = int(visual_positions.numel())
         self.num_kv_heads = model.config.num_key_value_heads
+        self.record_per_query = bool(record_per_query)
         self.prefill_scores: Optional[torch.Tensor] = None
         self.rounds: List[RoundTrace] = []
         self._active = False
@@ -83,14 +93,22 @@ class AttentionTraceCollector:
         self._active = False
         if not self._layer_scores:
             return
-        # [num_layers, kv_heads, visual_len] -> layer-mean [kv_heads, visual_len].
+        # Prefill keeps the query axis summed (q_len is the whole prompt);
+        # only verification rounds may retain it.
+        keep_query = self.record_per_query and target != "prefill"
+        # [num_layers, kv_heads, (q_len,) visual_len] -> layer-mean.
         stacked = torch.stack(list(self._layer_scores.values()), dim=0)
         visual_scores = stacked.mean(dim=0)
         if target == "prefill":
             self.prefill_scores = visual_scores
         else:
             self.rounds.append(
-                RoundTrace(round_id=self._label, visual_scores=visual_scores, query_len=self._query_len)
+                RoundTrace(
+                    round_id=self._label,
+                    visual_scores=visual_scores,
+                    query_len=self._query_len,
+                    per_query=keep_query,
+                )
             )
         self._layer_scores = {}
 
@@ -112,5 +130,10 @@ class AttentionTraceCollector:
             # preserving Top-K ordering).
             logits = (q_kv @ k_vis.transpose(-2, -1)) * (hd ** -0.5)
             w = logits.softmax(dim=-1)
-            # Sum attention mass across query positions -> [bsz, kv_heads, visual_len].
-            self._layer_scores[layer_idx] = w.sum(dim=2).squeeze(0).cpu()
+            # Default: sum attention mass across query positions
+            # -> [bsz, kv_heads, visual_len]. Per-query: keep the query axis
+            # -> [bsz, kv_heads, q_len, visual_len].
+            if self.record_per_query and self._label != "prefill":
+                self._layer_scores[layer_idx] = w.squeeze(0).cpu()
+            else:
+                self._layer_scores[layer_idx] = w.sum(dim=2).squeeze(0).cpu()

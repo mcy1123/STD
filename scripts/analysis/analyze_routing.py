@@ -151,6 +151,154 @@ def ascii_plot(xs, ys, width=60, height=16, ylabel="", title="", ymin=None, ymax
     return "\n".join(lines)
 
 
+def headroom_rows(analyzed: list) -> list:
+    """Per-round rows joining a round's measured accept length to its recall gain.
+
+    `accept_length` is the static STD run's accepted length for that round, used
+    as the "remaining headroom" proxy: a high value means the static selection
+    was already good for that round.
+    """
+    rows = []
+    for a in analyzed:
+        acc = list(a.get("accept_lengths") or [])
+        for t in range(a["T"]):
+            static_r = float(a["static_recall"][t])
+            prev_r = float(a["prev_recall"][t])
+            rows.append(
+                {
+                    "dataset": a.get("_dataset"),
+                    "sample_id": a["sample_id"],
+                    "round": t,
+                    "accept_length": float(acc[t]) if t < len(acc) else float("nan"),
+                    "static_recall": static_r,
+                    "prev_recall": prev_r,
+                    "delta_recall": prev_r - static_r,
+                }
+            )
+    return rows
+
+
+def _rankdata(values) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    order = np.argsort(arr, kind="mergesort")
+    ranks = np.empty(len(order), dtype=float)
+    ranks[order] = np.arange(len(order), dtype=float)
+    return ranks
+
+
+def _pearson(x, y) -> float:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 2 or x.std() == 0 or y.std() == 0:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def quantile_strata(rows: list, bins: int = 3) -> list:
+    """Equal-count bins over `accept_length`, lowest headroom first."""
+    valid = [r for r in rows if np.isfinite(r["accept_length"])]
+    if not valid:
+        return []
+    valid.sort(key=lambda r: r["accept_length"])
+    out = []
+    n = len(valid)
+    for b in range(bins):
+        lo = (b * n) // bins
+        hi = ((b + 1) * n) // bins
+        chunk = valid[lo:hi]
+        if not chunk:
+            continue
+        out.append(
+            {
+                "bin": b,
+                "n": len(chunk),
+                "accept_min": min(r["accept_length"] for r in chunk),
+                "accept_max": max(r["accept_length"] for r in chunk),
+                "mean_accept": float(np.mean([r["accept_length"] for r in chunk])),
+                "static_recall": float(np.mean([r["static_recall"] for r in chunk])),
+                "prev_recall": float(np.mean([r["prev_recall"] for r in chunk])),
+                "delta_recall": float(np.mean([r["delta_recall"] for r in chunk])),
+            }
+        )
+    return out
+
+
+def headroom_report(analyzed: list, out_dir: Path, bins: int = 3) -> dict:
+    """Print and persist the H_headroom stratification; return the summary."""
+    import csv
+
+    rows = headroom_rows(analyzed)
+    strata = quantile_strata(rows, bins=bins)
+
+    print("\n" + "-" * 78)
+    print("H_headroom: recall(Previous) - recall(Static), stratified by that round's")
+    print("measured static accept length (equal-count bins, LOW headroom first)")
+    print("-" * 78)
+    print(
+        f"{'bin':<4} {'n':>6} {'accept':>9} {'mean acc':>9} "
+        f"{'static':>8} {'prev':>8} {'delta(pp)':>10}"
+    )
+    for s in strata:
+        rng = f"{s['accept_min']:.0f}-{s['accept_max']:.0f}"
+        print(
+            f"{s['bin']:<4} {s['n']:>6} {rng:>9} {s['mean_accept']:>9.2f} "
+            f"{s['static_recall']:>8.4f} {s['prev_recall']:>8.4f} "
+            f"{100 * s['delta_recall']:>10.2f}"
+        )
+
+    valid = [r for r in rows if np.isfinite(r["accept_length"])]
+    pearson = spearman = float("nan")
+    if len(valid) >= 3:
+        acc = [r["accept_length"] for r in valid]
+        delta = [r["delta_recall"] for r in valid]
+        pearson = _pearson(acc, delta)
+        spearman = _pearson(_rankdata(acc), _rankdata(delta))
+        print(
+            f"\ncorr(accept_length, delta_recall): pearson={pearson:+.3f}  "
+            f"spearman={spearman:+.3f}"
+        )
+        print("H_headroom predicts a NEGATIVE correlation: the gain shrinks as the")
+        print("static selection already performs well.")
+
+    low = strata[0]["delta_recall"] if strata else float("nan")
+    high = strata[-1]["delta_recall"] if strata else float("nan")
+    if strata:
+        print(f"\nlow-headroom delta={100 * low:+.2f}pp   high-headroom delta={100 * high:+.2f}pp")
+        consistent = np.isfinite(low) and np.isfinite(high) and low > high and low > 0
+        print(
+            "=> H_headroom CONSISTENT (gain concentrated in low-headroom rounds)"
+            if consistent
+            else "=> H_headroom NOT supported by this run"
+        )
+
+    with (out_dir / "headroom_rounds.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["sample_id", "dataset", "round", "accept_length", "static_recall",
+             "prev_recall", "delta_recall"]
+        )
+        for r in rows:
+            writer.writerow(
+                [
+                    r["sample_id"], r["dataset"], r["round"],
+                    f"{r['accept_length']:.4f}", f"{r['static_recall']:.6f}",
+                    f"{r['prev_recall']:.6f}", f"{r['delta_recall']:.6f}",
+                ]
+            )
+
+    summary = {
+        "bins": strata,
+        "pearson_accept_vs_delta_recall": pearson,
+        "spearman_accept_vs_delta_recall": spearman,
+        "low_headroom_delta_recall": low,
+        "high_headroom_delta_recall": high,
+        "n_rounds": len(rows),
+    }
+    with (out_dir / "headroom_strata.json").open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--traces-dir", default=str(ROOT / "results" / "routing_traces"))
@@ -255,6 +403,9 @@ def main() -> None:
         print(f"{'EMA λ='+str(lam):<12} {proxy(em):>22.2f}")
     print(f"{'Oracle':<12} {proxy(om):>22.2f}")
 
+    # ---- H_headroom stratification (see the thorough-analysis plan) ----
+    headroom = headroom_report(analyzed, out_dir)
+
     # ---- Figures (ASCII) ----
     static_jaccard_mean, _ = align_mean([a["static_jaccard"] for a in analyzed], "mean")
     prev_jaccard_mean, _ = align_mean([a["prev_jaccard"] for a in analyzed], "mean")
@@ -324,6 +475,24 @@ def main() -> None:
         reason = "Drift exists but neither GO condition met; signal too weak for dynamic routing."
     print(f"Dynamic visual routing: {decision}")
     print(f"Reason: {reason}")
+
+    # ---- G-L1 gate: is a controlled online ablation (L2) warranted? ----
+    print("\n" + "-" * 78)
+    print("G-L1 GATE  (proceed to the L2 controlled ablation only if it passes)")
+    print("-" * 78)
+    g1_recall = recall_gain_prev >= 5.0
+    g1_strata = (
+        np.isfinite(headroom["low_headroom_delta_recall"])
+        and headroom["low_headroom_delta_recall"] > headroom["high_headroom_delta_recall"]
+        and headroom["low_headroom_delta_recall"] > 0
+    )
+    print(f"  recall(Previous)-recall(Static) >= +5.0pp : {recall_gain_prev:+.2f}pp -> {g1_recall}")
+    print(f"  gain concentrated in low-headroom rounds  : {g1_strata}")
+    print(
+        "  => "
+        + ("PROCEED to L2" if (g1_recall and g1_strata)
+           else "STOP: no exploitable signal on this dataset (H4)")
+    )
 
 
 if __name__ == "__main__":
