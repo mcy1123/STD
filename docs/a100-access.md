@@ -2,156 +2,168 @@
 
 > 每次要连 A100 跑实验时，把本文档丢给 agent 或自己照做即可。
 > 配套脚本：`scripts/a100.sh`（`bash scripts/a100.sh help`）。
+> **状态（2026-09-17）：已配置免密 SSH，日常使用不再需要密码。**
 
 ## 0. 一句话
 
 ```bash
-bash scripts/a100.sh status        # 看 gpu23 两张卡谁空
-bash scripts/a100.sh gpu 'nvidia-smi'   # 在 gpu23 上执行任意命令
+ssh a100-gpu                              # 直接从本机登进 gpu23
+bash scripts/a100.sh status               # 看两张卡谁空
+bash scripts/a100.sh e2e stage0           # 同步代码→查卡→跑实验→拉回报告
 ```
 
 ## 1. 连接拓扑
 
-本机**无法直达** GPU 节点，必须经过登录节点跳转：
+GPU 节点**不能从公网直达**，必须经登录节点跳转（现已用 `~/.ssh/config` 封装，你只需用别名）：
 
 ```
-本机 (Linux / Windows)
-  │  ssh -p 2323 xlwang@59.78.189.133      ← login2，需要密码（或密钥）
-  ▼
-login2（登录节点，有外网）
-  │  ssh 10.11.200.23                       ← gpu23，已配置免密（BatchMode 可用）
-  ▼
-gpu23（计算节点，2 × A100 80GB）
+本机 ──ssh -p 2323──▶ login2 ──ProxyJump──▶ gpu23
 ```
 
 | 项 | 值 |
 |---|---|
-| 登录节点 | `59.78.189.133`，端口 **2323**，用户 `xlwang`（主机名 `login2`） |
-| 计算节点 | `10.11.200.23`（主机名 `gpu23`），**只能从 login2 跳** |
-| 认证方式 | login2 目前为**密码认证**（本机 `~/.ssh` 无该主机密钥；gpu23 从 login2 免密） |
+| 登录节点别名 | **`ssh a100`** → `59.78.189.133:2323`，用户 `xlwang`（主机名 `login2`） |
+| GPU 节点别名 | **`ssh a100-gpu`** → `10.11.200.23`（主机名 `gpu23`），经 `ProxyJump a100` |
+| 认证 | **SSH 公钥**（`~/.ssh/id_ed25519`），已装好；login2 与 gpu23 都免密 |
 | GPU | 2 × NVIDIA A100 80GB PCIe |
+| 共享家目录 | `/public/home/xlwang` 在 login2 与 gpu23 之间**共享**，所以 `authorized_keys` 与代码在两台机器上一致 |
 
-> 本机到 `59.78.189.133:2323` 的 TCP 连通性已实测可达。
+## 2. `~/.ssh/config` 片段（备份/重建用）
 
-## 2. GPU 使用规约（重要）
+```sshconfig
+Host a100
+    HostName 59.78.189.133
+    Port 2323
+    User xlwang
+    IdentityFile ~/.ssh/id_ed25519
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-a100-%r@%h:%p
+    ControlPersist 600
+
+Host a100-gpu
+    HostName 10.11.200.23
+    User xlwang
+    IdentityFile ~/.ssh/id_ed25519
+    ProxyJump a100
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-a100gpu-%r@%h:%p
+    ControlPersist 600
+```
+
+> 注意：`ssh_config` 里"**首个命中的值生效**"，所以已有的 `Host *` 块要放在**前面**，本块追加在后即可。
+
+## 3. 免密原理与恢复
+
+- 本机公钥 `~/.ssh/id_ed25519.pub` 已写入集群的 `~/.ssh/authorized_keys`。
+- 因为 `/public/home` 是共享家目录，同一份 `authorized_keys` 对 login2 和 gpu23 同时生效，所以两跳都免密。
+- 若哪天免密失效，用密码重装一次即可（会提示输入一次密码）：
+
+  ```bash
+  ssh-copy-id -i ~/.ssh/id_ed25519.pub -p 2323 xlwang@59.78.189.133
+  ```
+
+- 验证：
+
+  ```bash
+  ssh -o BatchMode=yes a100 'hostname'          # 期望 login2
+  ssh -o BatchMode=yes a100-gpu 'hostname'      # 期望 gpu23
+  ```
+
+## 4. GPU 使用规约（重要）
 
 - **只用物理 GPU 1。**
-- **GPU 0 常驻一个 vLLM 工作负载**（`VLLM::Worker_TP0`，约 50GB 显存），**绝不触碰、绝不 kill**。
-- `scripts/benchmark_a100_dynamic.py` 与 `scripts/run_a100_ablation.sh` 自带空闲检查：目标卡利用率/占用不满足时会**直接拒绝启动**，这是预期行为，不要绕过。
+- **GPU 0 常驻 vLLM**（`VLLM::EngineCore`，约 79GB，100% 利用率），**绝不触碰**。
+- **GPU 1 可能被别人占用。** 截至 2026-09-17 21:xx，GPU 1 上有另一个作业：
 
-查看两卡状态：
+  ```
+  pid 47900  /public/home/xlwang/jyy/anaconda/envs/qwen25vl/bin/python  21352 MiB
+  ```
+
+  这不是你启动的进程，**不要 kill**。等它自行结束再跑实验。
+- `scripts/benchmark_a100_dynamic.py` 与 `run_a100_ablation.sh` 自带空闲检查：目标卡不空闲会**直接拒绝启动**，这是预期保护，不要绕过。
+
+查看状态：
 
 ```bash
 bash scripts/a100.sh status
 ```
 
-## 3. 凭证管理
-
-### 3.1 推荐：装一次密钥，之后永久免密
-
-```bash
-bash scripts/a100.sh setup-key          # 交互式输入一次密码
-```
-
-等价于 `ssh-copy-id -p 2323 xlwang@59.78.189.133`。装好后第 4 节所有命令**不再需要密码**，也是唯一能让自动化真正无人值守的方式。
-
-### 3.2 备选：ControlMaster 连接复用（不落盘密码）
-
-脚本默认行为。首次建立主连接时输一次密码，之后 **600 秒内**所有命令复用同一条 TCP 连接，不再提示：
-
-```bash
-bash scripts/a100.sh login 'hostname'   # 首次：提示输入密码
-bash scripts/a100.sh gpu   'hostname'   # 复用，无提示
-bash scripts/a100.sh close              # 主动关闭主连接
-```
-
-主连接 socket 默认在 `${TMPDIR:-/tmp}/a100-ssh-$USER/control`，可用 `A100_SOCK` 覆盖。
-
-### 3.3 备选：密码文件 + sshpass（本机**尚未安装** sshpass）
-
-```bash
-sudo apt install sshpass
-install -m600 /dev/null ~/.a100_password   # 把密码写进去，权限 600
-export A100_PASSWORD_FILE=~/.a100_password
-```
-
-### 3.4 ⛔ 绝对不要做
-
-- **不要把密码写进本仓库的任何文件。** 本仓库有 GitHub remote（`git@github.com:mcy1123/STD.git`），一旦 push 即泄露。
-- 不要把密码写进 `~/.zshrc`、别名或可提交的脚本。
-
-## 4. 远端关键路径
+## 5. 远端关键路径
 
 | 用途 | 路径 |
 |---|---|
-| 代码（实验实际使用的副本） | `/public/home/xlwang/mcy/Project/STD-latest` |
-| 代码（部署文档中的路径） | `/public/home/xlwang/mcy/Project/STD` |
+| 代码（实验实际工作副本） | `/public/home/xlwang/mcy/Project/STD-latest`（HEAD `40efa1e` + 工作区改动） |
+| 代码（部署文档中的旧路径） | `/public/home/xlwang/mcy/Project/STD`（HEAD `36046dd`） |
 | Python 环境 | `/public/home/xlwang/mcy/conda_envs/specvlm/bin/python` |
 | 模型 | `/public/home/xlwang/mcy/STD_assets/models/Qwen2.5-VL-7B-Instruct` |
 | 数据集 | `/public/home/xlwang/mcy/STD_assets/datasets/Video-MME`（视频在 `.../videos`） |
 | 结果 | `/public/home/xlwang/mcy/STD_assets/results` |
 
-> `STD-latest` 与 `STD` 都存在。2026-09-09 的所有 A100 实验 manifest 指向的是 **`STD-latest`**；改代码前先确认哪一个是当前工作副本。
+远端仓库的 `origin` 也是 `https://github.com/mcy1123/STD.git`，但**日常同步用 `a100.sh sync`（rsync），不依赖 GitHub**。
 
-## 5. 跑实验的标准流程
+## 6. `scripts/a100.sh` 用法
 
 ```bash
-# 1) 同步本地代码到远端（scp 经 login2，再落到 gpu23 或直接改 login2 上的副本）
-bash scripts/a100.sh push src/std_repro/dynamic_selection.py /public/home/xlwang/mcy/Project/STD-latest/src/std_repro/
+bash scripts/a100.sh help          # 全部子命令
+bash scripts/a100.sh status        # gpu23 两卡状态 + 占用进程
+bash scripts/a100.sh login [cmd]   # 在 login2 执行（无参数=交互 shell）
+bash scripts/a100.sh gpu   [cmd]   # 在 gpu23 执行（无参数=交互 shell）
+bash scripts/a100.sh sync  [paths] # rsync 本地代码到远端工作副本
+bash scripts/a100.sh ablation stage1   # 跑消融矩阵
+bash scripts/a100.sh e2e   stage1      # sync + 查卡 + 跑 + 拉回报告
+bash scripts/a100.sh push <local> <remote>
+bash scripts/a100.sh pull <remote> <local>
+bash scripts/a100.sh close         # 关闭复用连接
+```
 
-# 2) 确认 GPU1 空闲
-bash scripts/a100.sh status
+默认行为：
 
-# 3) 在 gpu23 上跑（离线模式；模型与数据都在本地盘，不要联网）
+- `sync` 默认同步 `src scripts tests docs PROGRESS.md README.md`（`--exclude __pycache__`）。
+- `e2e` 把 `*_report.md` / `*_summary.json` 拉到本地 `results/a100_ablation/`。
+- 所有目标可用环境变量覆盖：`A100_REPO`、`A100_ASSETS`、`A100_LOGIN_ALIAS`、`A100_GPU_ALIAS`、`A100_LOCAL_RESULTS` 等（见 `help`）。
+
+## 7. 手动跑一条实验（不经 e2e）
+
+```bash
 bash scripts/a100.sh gpu 'cd /public/home/xlwang/mcy/Project/STD-latest && \
   export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 && \
-  /public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
-  scripts/benchmark_a100_dynamic.py --gpu 1 --profile-components ...'
-
-# 4) 把结果拉回本地
-bash scripts/a100.sh pull /public/home/xlwang/mcy/STD_assets/results/xxx_report.md ./results/
+  CUDA_VISIBLE_DEVICES=1 /public/home/xlwang/mcy/conda_envs/specvlm/bin/python \
+  scripts/benchmark_a100_dynamic.py --gpu 1 --profile-components \
+    --model-path /public/home/xlwang/mcy/STD_assets/models/Qwen2.5-VL-7B-Instruct \
+    --data-path  /public/home/xlwang/mcy/STD_assets/datasets/Video-MME \
+    --video-root /public/home/xlwang/mcy/STD_assets/datasets/Video-MME/videos \
+    --output     /public/home/xlwang/mcy/STD_assets/results/my_run.jsonl \
+    --frame-num 128 --max-new-tokens 128 --limit 10 --repeats 2 \
+    --gamma 9 --k-plus-text 1024 \
+    --dynamic-collector v2 --refresh-mode full \
+    --dynamic-query-mode three --dynamic-bootstrap attention \
+    --selection-update-interval 1 --min-selection-change-ratio 0.05 \
+    --verify-fallback sequential_on_low_margin'
 ```
 
-消融实验矩阵直接用已入库的驱动脚本：
+> 输出文件用 `open(..., "x")` 创建，**不会覆盖已有文件**；重复实验请换新文件名。
+> 模型与数据都在本地盘，加 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` 避免联网。
 
-```bash
-bash scripts/a100.sh gpu 'cd /public/home/xlwang/mcy/Project/STD-latest && bash scripts/run_a100_ablation.sh stage1'
-```
-
-## 6. 文件传输
-
-```bash
-bash scripts/a100.sh push <本地路径> <远端绝对路径>   # 本机 -> login2
-bash scripts/a100.sh pull <远端绝对路径> <本地路径>   # login2 -> 本机
-```
-
-`push`/`pull` 走 login2。若要直达 gpu23，先 `push` 到 login2，再用
-`bash scripts/a100.sh gpu 'scp -q /tmp/x 10.11.200.23:/目标/'`（历史实验就是这么做的）。
-
-## 7. 常见故障
+## 8. 常见故障
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| `Permission denied (publickey,...,password)` | 正常，说明还没装密钥；用 `setup-key`（§3.1）或让脚本提示输密码 |
-| `Connection refused` / 超时 | 端口应为 **2323**（不是 22）；确认 `A100_PORT` |
-| 脚本连上但命令卡住 | 主连接可能已过期（ControlPersist 600s），重跑即可；或 `bash scripts/a100.sh close` 后重连 |
-| gpu23 上命令报 `Permission denied` | 说明 login2→gpu23 的免密失效；先 `bash scripts/a100.sh login 'ssh 10.11.200.23 hostname'` 手工确认 |
-| 实验拒绝启动（GPU not idle） | 预期保护：目标卡被占用。等空闲或确认是否有人在用 GPU1 |
+| `ssh a100` 报 `Could not resolve hostname` | `~/.ssh/config` 里的两个 Host 块丢了，按 §2 重建 |
+| `Permission denied (publickey)` | 密钥没装或被清；按 §3 用 `ssh-copy-id` 重装 |
+| `Connection refused` / 超时 | 端口必须是 **2323**（不是 22） |
+| `a100-gpu` 报 `channel ... open failed` | login2 的 TCP 转发被限制；改用嵌套 `ssh a100 'ssh 10.11.200.23 ...'` |
+| 实验拒绝启动（GPU not idle） | 预期保护：GPU1 被占用。`status` 看是谁，**不要 kill 别人的进程** |
+| rsync 报 `command not found` | `-e` 用错；用脚本的 `sync`/`push`/`pull`，别手写 `-e "ssh a100"` |
 
-## 8. ⚠️ 安全警告：密码已明文泄露
+## 9. ⚠️ 安全事项
 
-排查连接方式时发现，**该账号的登录密码以明文形式存在于本机的 agent 会话记录中**：
+- **密码仍以明文存在于本机 agent 会话记录中**：
 
-```
-~/.codex/sessions/**/*.jsonl
-~/.codex/history.jsonl
-```
+  ```
+  ~/.codex/sessions/**/*.jsonl
+  ~/.codex/history.jsonl
+  ```
 
-这些文件同时包含主机、端口、账号与密码。建议按顺序处理：
-
-1. **轮换该账号密码**（最彻底；上述记录无法保证已被清理）。
-2. 清理或加密这些会话记录（`~/.codex/` 下相关文件）。
-3. 之后改用 **SSH 密钥认证**（§3.1），从此不再有任何地方需要保存密码。
-4. 若曾把 `~/.codex` 或本仓库同步到云端/网盘/其他机器，视同已泄露处理。
-
-> 本手册与 `scripts/a100.sh` **均不含任何密码**，可安全提交。
+  本次已把临时落盘的密码文件删除（`~/.ssh/a100_password`、`~/.ssh/a100_askpass.sh` 均已清理），但**记录里的那份还在**。建议**轮换该账号密码**，或至少清理/加密这些记录。
+- 本手册与 `scripts/a100.sh` **均不含任何密码**，可安全提交。
+- 本仓库有 GitHub remote，**永远不要把密码写进仓库里的任何文件**。

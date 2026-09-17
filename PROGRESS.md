@@ -217,7 +217,7 @@
 - `results/adaptive_k_offline/`、`results/adaptive_gamma_offline/`、`results/adaptive_gamma_runtime*/`、`results/adaptive_gamma_fixed_q_sweep*/` — offline 模拟与 γ 运行时/sweep。
 - `results/correctness_fallback_a6000/` — fallback A/B 诊断。
 - `results/a100_dynamic_20260909_*.jsonl|_summary.json|_report.md` — VG-Lite A100 全量配对结果。
-- `results/a100_hsd_spike_report.md` — HSD 报告（原始 jsonl 在远端 `STD_assets/results/`，本地未同步）。
+- `results/a100_hsd_spike_report.md` — HSD 报告；原始 `a100_hsd_spike_20260909{,_l3}.jsonl` 已于 2026-09-17 从远端拉回本地 `results/`。
 - 注：`results/` 已被 `.gitignore` 忽略，仅作本地/远端审计产物。
 
 ---
@@ -346,7 +346,7 @@
 
 **状态**：**事实已完成**。§14 所有 A100 运行的 manifest 均指向 `STD_assets` 下的模型与数据路径，证明环境/模型/数据已跑通；但 `.spec-workflow/` 的 plan 复选框与 approvals 未更新，**部署记录与代码库脱节**。执行脚本/记录待补。
 
-**访问方式**：连接拓扑、远端路径、GPU 规约与故障排查已固化为 `docs/a100-access.md`，配套可复用脚本 `scripts/a100.sh`（`login` / `gpu` / `status` / `push` / `pull` / `setup-key` / `close` / `ablation`）。链路为 `本机 --ssh -p 2323 xlwang@59.78.189.133--> login2 --ssh--> gpu23(10.11.200.23)`；gpu23 上 **GPU0 常驻 vLLM，只用 GPU1**。两个产物均不含任何凭证。
+**访问方式**：连接拓扑、远端路径、GPU 规约与故障排查已固化为 `docs/a100-access.md`，配套可复用脚本 `scripts/a100.sh`（`status` / `login` / `gpu` / `sync` / `ablation` / `e2e` / `push` / `pull` / `close`）。**已配置免密**：`~/.ssh/config` 提供别名 `a100`（login2 = `59.78.189.133:2323`）与 `a100-gpu`（gpu23 = `10.11.200.23`，经 ProxyJump），公钥 `~/.ssh/id_ed25519` 已装入集群；`/public/home` 为共享家目录，故 login2 与 gpu23 同时免密。日常流程为 `a100.sh e2e <stage>`（同步代码 → 查卡 → 跑消融 → 拉回报告）。gpu23 上 **GPU0 常驻 vLLM，只用 GPU1**。两个产物均不含任何凭证。
 
 
 ---
@@ -412,7 +412,7 @@
 
 **结论**：负结果，不建议继续此形态。若要做快，需要真正更便宜的中间验证器（独立 slim 模型/子网络）和/或重叠调度，而不是简单插入稀疏注意力。
 
-**产物**：`src/std_repro/hsd_spike.py`、`scripts/benchmark_a100_hsd_spike.py`、`tests/test_hsd_spike*.py`、`results/a100_hsd_spike_report.md`（原始 `a100_hsd_spike_20260909_l3.jsonl` 在远端 `STD_assets/results/`，本地未同步）。
+**产物**：`src/std_repro/hsd_spike.py`、`scripts/benchmark_a100_hsd_spike.py`、`tests/test_hsd_spike*.py`、`results/a100_hsd_spike_report.md`（原始 `a100_hsd_spike_20260909{,_l3}.jsonl` 已拉回本地 `results/`）。
 
 ---
 
