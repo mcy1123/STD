@@ -259,3 +259,73 @@ PYTHONPATH=src python scripts/analysis/analyze_collector_ablation.py \
 
 旧方案 `docs/superpowers/plans/2026-09-17-dynamic-std-ablation-rerun.md` 的 R1–R6 矩阵仍可用作 **L2 的执行载体**，
 但**判读框架由本文取代**：先过 L0（阶段 A），先做 L1（阶段 B/C），再谈 L2；且 L2 必须分层报告（G6）。
+
+---
+
+## 10. L1 执行结果（2026-09-18）— G-L1 通过
+
+**为什么在本机跑**：执行时 A100 两张卡均被占用（GPU0 vLLM 79GB/100%；GPU1 他人作业，按 shard 进度估算还要 ~1.5–2 天）。
+按 §8 的备选，把 **L1（离线机制分析）提前到本机 A6000/GPU7** 执行——L1 只考察 attention 选择的重叠度与 recall，
+对硬件不敏感；**L2 的墙钟与正确性对比仍按计划留在 A100**。
+
+**配置**：Video-MME 20 样本（seed-42，与 A100 实验同序）、128 帧、256 tokens、γ=9、K+text=1024、CoT、`--record-per-query`。
+采集 20/20 成功，共 **442 轮验证**；本地样本 ID（050-1/717-1/496-3…）与 A100 manifest 完全一致。
+
+### 10.1 Oracle Study（**首次在 Video-MME 上做**）
+
+| selector | mean recall | Δ vs Static | attention mass |
+|---|---:|---:|---:|
+| Static | 0.6465 | — | 0.3713 |
+| **Previous** | **0.7288** | **+8.23 pp** | 0.3920 |
+| EMA λ=0.5 | 0.7294 | +8.29 pp | 0.3942 |
+| Oracle | 1.0000 | — | 0.4311 |
+
+**结论：动态信号在 Video-MME 上确实存在**（Original 判定亦为 GO：Oracle accept-proxy +1.20 token），
+但比 VDC 弱（VDC 上 Previous +19.89 pp）。→ **H4（该数据集无信号）被否证。**
+
+### 10.2 H_headroom（按每轮实测 static accept 等分箱，低 headroom 在前）
+
+| bin | n | accept 范围 | mean accept | static recall | prev recall | **Δ** |
+|---|---:|---|---:|---:|---:|---:|
+| 0（低 headroom） | 147 | 0–8 | 3.22 | 0.5930 | 0.7361 | **+14.31 pp** |
+| 1 | 147 | 8–9 | 8.97 | 0.6484 | 0.7345 | +8.61 pp |
+| 2（高 headroom） | 148 | 9 | 9.00 | 0.6539 | 0.7134 | **+5.95 pp** |
+
+- `corr(accept_length, Δrecall)`：pearson **−0.255**、spearman **−0.258**（负相关，方向符合预测）
+- **H_headroom CONSISTENT**：增益随 static 剩余空间缩小而单调下降。
+
+### 10.3 collector 估计质量消融
+
+| estimator | fidelity vs all | predictive（对下一轮） | churn Jaccard |
+|---|---:|---:|---:|
+| all（V1 参照） | 1.0000 | 0.7302 | **0.5846** |
+| **two** | **0.8153** | 0.7004 | **0.5660** |
+| three | 0.8242 | 0.7081 | 0.5726 |
+
+- two-query 保真度 **0.815**：子采样确实损失约 **18%** 的全 query top-K（值得修，但不是主因）。
+- **churn 几乎不受子采样影响**（all 0.585 vs two 0.566）→ **H3（two-query 是 churn 来源）基本被否证**。
+  churn 是 **Video-MME 上 attention 信号本身的固有漂移**，且与线上观测的 ~0.52 吻合。
+
+### 10.4 G-L1 门槛判定
+
+```
+recall(Previous)-recall(Static) >= +5.0pp : +8.23pp -> True
+gain concentrated in low-headroom rounds  : True
+=> PROCEED to L2
+```
+
+### 10.5 对 A100 负结果的解释更新
+
+A100 上 `dynamic < static` **不能**再归因于 collector 子采样（H3 否证），也不能归因于"该数据集没有信号"（H4 否证）。
+剩余解释收敛到两条：
+
+1. **H_headroom 的条件效应**：static 已接近上限（accept=9）时，每轮替换 ~30% KV 的更新是净噪声；
+   Video-MME 的平均 static accept（0.82）远高于 VDC（0.53），因此整体均值为负、而低 headroom 轮为正。
+2. **H1 更新/refresh 机制**：`incremental` 的 slot 顺序、以及"每轮替换 30%"这一更新强度本身可能与漂移速度不匹配。
+
+→ **L2 的消融范围因此收窄为 H1 + headroom 分层**，无需再纠结 bootstrap 与 query 模式（H2/H3 已弱化）。
+
+**产物（本地，`results/` 被 gitignore）**：`results/routing_traces_videomme/`（20 份 per-query trace，~1.1 GB）、
+`results/routing_analysis_videomme/`（含 `headroom_rounds.csv`、`headroom_strata.json`）、
+`results/routing_collector_ablation/collector_ablation.json`。
+
