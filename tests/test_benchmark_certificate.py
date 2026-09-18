@@ -155,6 +155,45 @@ class TestJsonable:
         assert bc._jsonable(Fake()) == [1, 2]
 
 
+class TestViabilityVerdict:
+    """Section D is the decision the whole probe exists to make."""
+
+    def _curve(self, coverage, precision):
+        return [{"threshold": 1.0, "certified_rounds": 5, "coverage": coverage,
+                 "precision": precision, "wrong_skips": 0}]
+
+    def test_open_and_reachable_when_strict_certificate_clears_the_rate(self):
+        curve = self._curve(0.40, 1.0)
+        text = bc.render_report(_aggregate(0.87, curve[0], None, curve), sample_ids=["a"], args=_args())
+        assert "OPEN AND REACHABLE" in text
+
+    def test_closed_when_the_ceiling_is_below_the_required_rate(self):
+        curve = self._curve(0.10, 1.0)
+        text = bc.render_report(_aggregate(0.20, curve[0], None, curve), sample_ids=["a"], args=_args())
+        assert "CLOSED" in text
+        assert "ceiling" in text
+
+    def test_open_but_unreached_when_only_a_lossy_certificate_gets_there(self):
+        curve = self._curve(0.10, 1.0)
+        text = bc.render_report(_aggregate(0.87, curve[0], None, curve), sample_ids=["a"], args=_args())
+        assert "OPEN BUT NOT YET REACHED" in text
+
+    def test_closed_when_even_a_perfect_certificate_cannot_pay(self):
+        curve = self._curve(1.0, 1.0)
+        aggregate = _aggregate(1.0, curve[0], None, curve)
+        aggregate["timing"]["cached_sparse_pass_seconds"] = 30.0
+        text = bc.render_report(aggregate, sample_ids=["a"], args=_args())
+        assert "CLOSED" in text
+        assert "fires on every round" in text
+
+    def test_reports_the_three_deciding_numbers(self):
+        curve = self._curve(0.40, 1.0)
+        text = bc.render_report(_aggregate(0.87, curve[0], None, curve), sample_ids=["a"], args=_args())
+        assert "87.0%" in text
+        assert "40.0%" in text
+        assert "32%" in text
+
+
 class TestParseArgs:
     def test_rejects_gamma_below_two(self):
         with pytest.raises(SystemExit):

@@ -224,6 +224,31 @@ def render_report(aggregate: Mapping[str, Any], *, sample_ids: Sequence[str], ar
     lines.append("cannot be met by any certificate, because no rule computable from the sparse pass alone can")
     lines.append("certify a round whose sparse and dense argmax differ.")
     lines.append("")
+    required = cached_gate["required_skip_rate"]
+    ceiling = float(aggregate["round_ceiling"])
+    strict_coverage = float(strict["coverage"]) if strict else 0.0
+    if required >= 1.0:
+        verdict = ("**CLOSED.** Even a certificate that fires on every round cannot pay for the middle pass "
+                   "at this configuration.")
+    elif ceiling < required:
+        verdict = ("**CLOSED.** The round-level ceiling sits below the required rate, so no certificate "
+                   "computable from the sparse pass alone can pay for the middle pass.")
+    elif strict_coverage >= required:
+        verdict = ("**OPEN AND REACHABLE.** A precision-1.0 certificate on the top-1 margin alone already "
+                   "clears the required rate, so the middle level can be built losslessly.")
+    else:
+        verdict = ("**OPEN BUT NOT YET REACHED.** The mechanism is economically viable, but the best "
+                   "precision-1.0 margin certificate covers less than the required rate; either a stronger "
+                   "certificate statistic or a configuration with a larger dense saving is needed.")
+    lines += [
+        "## D. Is the mechanism viable?",
+        "",
+        f"- required certificate rate (mask-cached middle pass): **{required * 100:.0f}%**",
+        f"- round-level ceiling: **{ceiling * 100:.1f}%**",
+        f"- best precision-1.0 certificate coverage: **{strict_coverage * 100:.1f}%**",
+        f"- {verdict}",
+        "",
+    ]
     return "\n".join(lines)
 
 
