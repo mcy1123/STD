@@ -7,6 +7,7 @@ emit the per-sample pairing and the headroom strata.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -80,3 +81,78 @@ class TestHeadroomSummary:
         assert methods == {"dynamic_v2", "dynamic_v1"}
         v1 = [s for s in out["strata"] if s["method"] == "dynamic_v1"]
         assert all(s["mean_delta_accept"] == pytest.approx(-0.05, abs=1e-3) for s in v1)
+
+
+def _write_run(path, *, timing_valid, tmp_path):
+    """Minimal but complete run so `summarize` accepts it."""
+    rows = [
+        {
+            "kind": "manifest",
+            "sample_ids": ["s1"],
+            "timing_valid": timing_valid,
+            "git_head": "deadbeef",
+            "args": {
+                "repeats": 1,
+                "frame_num": 128,
+                "max_new_tokens": 128,
+                "warmup_tokens": 16,
+                "gpu": 0,
+                "sparse_attn_mode": "gqa_sdpa",
+                "gamma": 9,
+                "k_plus_text": 1024,
+                "verify_fallback": "none",
+            },
+        }
+    ]
+    component_keys = list(summ.COMPONENT_KEYS)
+    for method in ("ar", "static", "dynamic_v2"):
+        trial = {
+            "kind": "trial",
+            "sample_id": "s1",
+            "phase": "measure",
+            "repeat": 0,
+            "method": method,
+            "decoding_time": 10.0,
+            "inference_time": 20.0,
+            "acceptance_rate": 0.8,
+            "peak_memory_gib": 30.0,
+        }
+        trial.update({k: 1.0 for k in component_keys})
+        rows.append(trial)
+        if method != "ar":
+            rows.append(
+                {
+                    "kind": "comparison",
+                    "sample_id": "s1",
+                    "phase": "measure",
+                    "repeat": 0,
+                    "method": method,
+                    "token_equal": True,
+                    "mismatch_token_count": 0,
+                }
+            )
+    rows.append({"kind": "complete", "samples": 1, "repeats": 1})
+    path = tmp_path / "run.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
+
+
+class TestTimingValidityPropagation:
+    def test_idle_run_reports_valid_timing(self, tmp_path):
+        path = _write_run(tmp_path / "a.jsonl", timing_valid=True, tmp_path=tmp_path)
+        result = summ.summarize(path)
+        assert result["timing_valid"] is True
+
+    def test_shared_gpu_run_reports_invalid_timing(self, tmp_path):
+        path = _write_run(tmp_path / "b.jsonl", timing_valid=False, tmp_path=tmp_path)
+        result = summ.summarize(path)
+        assert result["timing_valid"] is False
+
+    def test_missing_field_defaults_to_valid(self, tmp_path):
+        """Runs recorded before the flag existed must keep reporting speedups."""
+        path = _write_run(tmp_path / "c.jsonl", timing_valid=True, tmp_path=tmp_path)
+        lines = [json.loads(l) for l in path.read_text().splitlines()]
+        del lines[0]["timing_valid"]
+        path.write_text("\n".join(json.dumps(r) for r in lines) + "\n")
+
+        assert summ.summarize(path)["timing_valid"] is True

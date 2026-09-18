@@ -113,6 +113,7 @@ def summarize(path):
         "totals": totals,
         "per_sample": per_sample,
         "headroom": headroom_summary(groups, samples, methods),
+        "timing_valid": bool(manifest.get("timing_valid", True)),
         "complete": complete,
     }
 
@@ -127,6 +128,12 @@ def main():
     stem = args.input.stem
     (args.output_dir / f"{stem}_summary.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     cfg = result["manifest"]["args"]
+    # Co-tenancy makes wall-clock meaningless; acceptance/exactness stay valid.
+    timing_valid = result["timing_valid"]
+
+    def speedup(value: float) -> str:
+        return f"{value:.3f}x" if timing_valid else "n/a"
+
     text = [f"A100 dynamic STD comparison — {stem}", "",
             f"Video-MME: {len(result['per_sample'])} available-subset samples, seed-42 order; "
             f"{cfg['frame_num']} requested frames; {cfg['max_new_tokens']} fixed output tokens; "
@@ -139,14 +146,21 @@ def main():
             f"bootstrap={cfg.get('dynamic_bootstrap', 'attention')}; "
             f"coverage={cfg.get('bootstrap_coverage_ratio', 0.25)}; "
             f"value_weight={cfg.get('bootstrap_value_weight', 0.25)}; "
-            f"K+text={cfg['k_plus_text']}; fallback={cfg['verify_fallback']}.", "",
+            f"K+text={cfg['k_plus_text']}; fallback={cfg['verify_fallback']}.", ""]
+    if not timing_valid:
+        text += [
+            "> **WARNING: `timing_valid=false`** — this run shared a non-idle GPU. All wall-clock "
+            "numbers and speedups are invalid and are shown as `n/a`. Acceptance and exactness "
+            "remain valid because they are deterministic for fixed inputs.", "",
+        ]
+    text += [
             "Times below sum each sample's median across repetitions. Speedup = baseline / method; greater than 1 is faster.", "",
             "| Method | Prefill (s) | Decode (s) | vs AR | vs static | Inference (s) | Inf. vs AR | Inf. vs static | Exact | Peak GiB |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for method, r in result["totals"].items():
-        text.append(f"| {method} | {r['prefill_time']:.3f} | {r['decoding_time']:.3f} | {r['decoding_time_speedup_vs_ar']:.3f}x | "
-                    f"{r['decoding_time_speedup_vs_static']:.3f}x | {r['inference_time']:.3f} | "
-                    f"{r['inference_time_speedup_vs_ar']:.3f}x | {r['inference_time_speedup_vs_static']:.3f}x | "
+        text.append(f"| {method} | {r['prefill_time']:.3f} | {r['decoding_time']:.3f} | {speedup(r['decoding_time_speedup_vs_ar'])} | "
+                    f"{speedup(r['decoding_time_speedup_vs_static'])} | {r['inference_time']:.3f} | "
+                    f"{speedup(r['inference_time_speedup_vs_ar'])} | {speedup(r['inference_time_speedup_vs_static'])} | "
                     f"{r['exact_trials']}/{r['total_trials']} | {r['peak_memory_gib']:.2f} |")
     text += ["", "Component totals (when --profile-components is enabled; medians per sample):",
              "| Method | Cache init | Selection prefill | Selection/top-k | Dense prefill | Sparse cache | Draft | Verify | Bonus | Cache adjust |",

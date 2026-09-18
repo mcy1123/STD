@@ -71,6 +71,21 @@ def parse_args():
     p.add_argument("--profile-components", action="store_true",
                    help="record synchronized prefill/decode component timings")
     p.add_argument("--max-rss-gib", type=float, default=48)
+    p.add_argument(
+        "--allow-shared-gpu",
+        action="store_true",
+        help=(
+            "Proceed on a non-idle GPU. Acceptance and exactness are still valid, "
+            "wall-clock is not: the manifest records timing_valid=false and the "
+            "summarizer will not report speedups. Requires enough free memory."
+        ),
+    )
+    p.add_argument(
+        "--min-free-gib",
+        type=float,
+        default=0.0,
+        help="Refuse to start unless the selected GPU has at least this much free memory.",
+    )
     args = p.parse_args()
     if min(args.limit, args.repeats, args.frame_num, args.max_new_tokens, args.warmup_tokens) < 1:
         p.error("sample, repeat, frame and token counts must be positive")
@@ -142,8 +157,21 @@ def main():
     snapshot = gpu_snapshot()
     print(snapshot, flush=True)
     selected = [line.split(",") for line in snapshot.splitlines() if int(line.split(",")[0]) == args.gpu]
-    if len(selected) != 1 or int(selected[0][3]) > 256 or int(selected[0][5]) != 0:
-        raise RuntimeError("Selected physical GPU is not idle; experiment not started")
+    gpu_idle = len(selected) == 1 and int(selected[0][3]) <= 256 and int(selected[0][5]) == 0
+    if not gpu_idle:
+        if not args.allow_shared_gpu:
+            raise RuntimeError("Selected physical GPU is not idle; experiment not started")
+        # Co-tenancy invalidates wall-clock comparisons but NOT acceptance or
+        # exactness, which are deterministic for fixed inputs. The run is
+        # recorded as timing-invalid and the summarizer refuses to report
+        # speedups from it.
+        print(f"SHARED_GPU: proceeding on a non-idle GPU ({selected[0][3]} MiB used, "
+              f"{selected[0][5]}% util); timing is invalid, acceptance is not.", flush=True)
+    if int(selected[0][4]) < args.min_free_gib * 1024:
+        raise RuntimeError(
+            f"Selected GPU has only {int(selected[0][4]) // 1024} GiB free; "
+            f"--min-free-gib requires {args.min_free_gib}."
+        )
     if torch.cuda.device_count() != 1:
         raise RuntimeError("Expected exactly one visible CUDA device")
 
@@ -167,6 +195,7 @@ def main():
         emit({"kind": "manifest", "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "host": socket.gethostname(), "physical_gpu": args.gpu,
               "gpu_snapshot": snapshot, "torch": torch.__version__, "cuda": torch.version.cuda,
+              "timing_valid": bool(gpu_idle),
               "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
               "git_worktree_modified": git_dirty,
               "source_sha256": hashes, "args": vars(args), "dtype": "float16",
