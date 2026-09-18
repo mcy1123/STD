@@ -331,7 +331,7 @@ A100 上 `dynamic < static` **不能**再归因于 collector 子采样（H3 否�
 
 ---
 
-## 11. L2 筛选：R0（full refresh）结果（2026-09-18）— H1 被排除
+## 11. L2 筛选：R0（full refresh）+ R1（incremental）结果（2026-09-18）— H1 直接排除
 
 **执行**：本机 A6000（当时 GPU0 空闲），`results/l2_screening/R0_full_three_att.jsonl`。
 配置：Video-MME 10 样本（seed-42 同序）、128 帧、128 tokens、γ=9、K+text=1024、
@@ -371,17 +371,46 @@ A100 上 `dynamic < static` **不能**再归因于 collector 子采样（H3 否�
 ### 11.3 结论
 
 1. **H_headroom 在 full refresh 下依然成立**（相关系数 −0.74，低 headroom 组 +0.115）。
-   由于 R0 用的是 **full rebuild**，**H1（incremental slot 顺序是负结果主因）被排除**。
+   由于 R0 用的是 **full rebuild**，**H1（incremental slot 顺序是负结果主因）被排除**；
+   该排除随后被 **R1 的直接对照**独立确认（见 §11.4）。
 2. 均值问题第三次出现：**−0.031 的均值掩盖了 ±0.19 的分化**——再次证明方案 §1 的重构是对的。
 3. 附带观测：本机 A6000 上 **static STD vs AR 的 decode = 62.8s vs 87.9s ≈ 1.40×**（128 tokens），
    高于 A100 上的 1.15–1.24×——值得单独留意（见 §12 待办）。
 
-### 11.4 R1（incremental）状态
+### 11.4 R1（incremental）结果 —— H1 直接排除（2026-09-18 已跑，2026-09-19 补算）
 
-R1 的对照尚未产出：本机 8 张卡全部被争用，且在 16 分钟的页缓存预热窗口内 GPU0/GPU3 均被他人作业抢走；
-R0 峰值需 **34.3 GiB**，当时无任何单卡有 ≥35 GiB 空闲。
-已改为 `--allow-shared-gpu`（只要求足够空闲显存，`timing_valid=false`，speedup 一律渲染为 `n/a`），
-并由 `/tmp/wait_r1.sh` 轮询等待合格显存后自动启动。**R1 未完成前，H1 的排除依据是"R0 下 H_headroom 依然成立"这一逻辑论证，而非 R0/R1 的直接对照。**
+**状态更正**：R1 **已经跑完**，产物 `results/l2_screening/R1_incr_three_att.jsonl`（112 行、`complete`、**`timing_valid=true`**）。
+当时的 `wait_r1.log` 显示前 13 次尝试都被抢卡（rc=1），第 14 次在 GPU0 上成功（`R1_EXIT=0`），
+但结果没有回写本文档——**这不是未完成，而是未整理**。
+
+**对照的干净性**：与 R0 之间只有单变量差异 `refresh_mode: full → incremental`
+（`cache_len` 40960 vs 20480 仅影响预分配），且
+`dynamic_std_qwen25vl.py` / `dynamic_selection.py` / `sparse_cache_refresh.py` 的 sha256 **与 R0 逐字节相同**。
+
+| 指标 | R0（full） | R1（incremental） |
+|---|---:|---:|
+| mean static accept | 0.8103 | **0.8103**（逐样本相同 → 仪表自检通过） |
+| mean Δaccept | −0.0308 | **−0.0305** |
+| `corr(static_accept, Δ)` | −0.740 | **−0.728** |
+| 低 headroom 分箱 Δ | +0.115 | **+0.115** |
+| 逐样本差异 | — | **7/10 逐位一致**，其余 3 个 \|Δ\| ≤ 0.018 |
+| T1 `consistency_mismatches` | 0 / 30 | **0 / 30** |
+| exact（static / dynamic） | 8/10 / 8/10 | 8/10 / 8/10（同为 `496-3`、`754-1`；**static 本身即不符**） |
+
+**经济性**（每轮 refresh，ms）：
+
+| refresh | mean | p50 | p90 | p99 | max | 10 样本总计 |
+|---|---:|---:|---:|---:|---:|---:|
+| full（R0） | 70.9 | 16.9 | 274.0 | 562.8 | 598.1 | 11.84 s |
+| **incremental（R1）** | **22.0** | 21.8 | 23.4 | 26.1 | 29.3 | **3.68 s** |
+
+**但端到端仍然没赢**：static **328.0 ms/轮**（168 轮）vs dynamic **403.1 ms/轮**（167 轮）→ **+75.1 ms/轮（+22.9 %）**，
+其中 refresh 只占 22.0、selection update 占 ~10.1、draft+verify+bonus 占 ~8.9，
+**余下 ≈34 ms/轮是未被 profile 覆盖的 host 侧开销**——这是 E4 的真正靶子。轮数几乎没变（167 vs 168），多花的时间仍是纯开销。
+
+**两条判读**：
+1. **H1 排除由逻辑论证升级为直接对照**，且 headroom 结构（corr ≈ −0.73）在两种 refresh 下稳定复现。
+2. **incremental 作为默认配置现在有数据支撑**（代码里 `--refresh-mode` 本来就是 `incremental`）：同等 accept、refresh 便宜 **3.2×**、且消除了长尾（max 598 → 29 ms）。
 
 ---
 
@@ -457,6 +486,10 @@ R0 峰值需 **34.3 GiB**，当时无任何单卡有 ≥35 GiB 空闲。
 | **E2** | **运行时实现 EMA 平滑** | 把 `S_t = TopK(A_t)` 换成 `S_t = TopK(EMA(A))`；离线已测 λ=0.5 的召回率 **0.7294 vs Previous 0.7288（打平）**，但更平滑 | 相同 Δaccept 下 churn 更低（搬运更少）；或 churn 相同下 Δaccept 更高 | 小（**离线已测过，运行时从未实现**） |
 | **E3** | **headroom-gated 启用** | 先跑一轮 static 量出该样本表现，低于阈值 τ 才启用动态 | 在低 headroom 分层上 Δaccept ≥ +0.10，同时高分层不再亏 | 小（§11 结论的直接推论） |
 | **E4** | **降搬运成本（不改核）** | ① 去掉刷新后的强制 `cuda.synchronize()` 或挪到旁路流；② 合并 224 次 `unique`（视觉/非视觉位置本就不重叠，只需排序）；③ 批量 gather | `refresh` 从 71 ms/轮 降到 < 15 ms/轮 | 中 |
+
+> **E4 的目标已因 R1 而改变（2026-09-19）**：incremental 已经把 refresh 从 **70.9 → 22.0 ms/轮**（§11.4），
+> 所以"把 refresh 降到 <15 ms"的增量收益变小；**真正的大头变成了未被 profile 覆盖的 ~34 ms/轮 host 侧开销**
+> （Python 记账、digest、断言、循环本身）。E4 应改为"**先给动态主循环补上覆盖 host 侧的计时，再定位并消掉它**"。
 | **E5** | **索引化 KV（PagedAttention 式）** | 不做物理复制，让稀疏注意力按索引直接从完整缓存取 K/V；"换选择"退化为一组索引写入 | 每轮搬运数据量 **57 MB → 0.45 MB（↓128×）**；过路费 → < 5 % | **大**（需新注意力核） |
 | **E6** | **用更全的打分** | 既然打分只占 1.9 %，把 two-query 换成 all-query，补回那 18 % 保真度 | `fidelity` 0.815 → ~1.0；Δaccept 有可测提升 | 小（改一个开关） |
 | **E7** | **换判别标准** | 用"注意力 × value 范数"或按草稿实际需要标定，而不是原始注意力大小 | 同等 K 下 accept 提升 | 中 |
