@@ -79,17 +79,28 @@ def offset_causal_mask(*args, **kwargs):
 def position_records(
     sparse_logits: torch.Tensor,
     dense_logits: torch.Tensor,
-) -> List[Dict[str, float]]:
+    draft_next: Optional[Sequence[int]] = None,
+) -> List[Dict[str, Any]]:
     """Per-position agreement and free certificate statistics.
 
     ``sparse_logits[i]`` and ``dense_logits[i]`` are the next-token distributions
     after the same prefix plus ``draft[:i+1]``, so comparing their argmax at
     position ``i`` is exactly the question a sparse verifier asks.
+
+    ``draft_next[i]`` is the token the draft block actually contained at the
+    position this row predicts, i.e. ``draft[i+1]``.  Agreement between the sparse
+    pass and that token is a second, free opinion: it comes from a different
+    distribution than the sparse/dense comparison, so it can carry information the
+    top-1 margin does not.  The final row predicts the bonus token, which no draft
+    proposed, so its ``draft_agree`` is ``None`` and it is excluded from the
+    round-level conjunction.
     """
     if sparse_logits.shape != dense_logits.shape:
         raise ValueError("sparse and dense logits must have the same shape")
     if sparse_logits.ndim != 2:
         raise ValueError("expected [block, vocab] logits")
+    if draft_next is not None and len(draft_next) != sparse_logits.shape[0]:
+        raise ValueError("draft_next must have one entry per position")
     sparse = sparse_logits.float()
     dense = dense_logits.float()
     s_vals, s_idx = torch.topk(sparse, k=2, dim=-1)
@@ -97,24 +108,34 @@ def position_records(
     log_probs = torch.log_softmax(sparse, dim=-1)
     entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
     agree = (s_idx[:, 0] == d_idx[:, 0]).tolist()
-    return [
-        {
-            "position": index,
-            "agree": bool(agree[index]),
-            "sparse_top1": int(s_idx[index, 0].item()),
-            "dense_top1": int(d_idx[index, 0].item()),
-            "margin": float((s_vals[index, 0] - s_vals[index, 1]).item()),
-            "dense_margin": float((d_vals[index, 0] - d_vals[index, 1]).item()),
-            "entropy": float(entropy[index].item()),
-        }
-        for index in range(sparse.shape[0])
-    ]
+    records: List[Dict[str, Any]] = []
+    for index in range(sparse.shape[0]):
+        expected = None if draft_next is None else draft_next[index]
+        if expected is None:
+            draft_agree: Optional[bool] = None
+        else:
+            draft_agree = bool(int(s_idx[index, 0].item()) == int(expected))
+        records.append(
+            {
+                "position": index,
+                "agree": bool(agree[index]),
+                "sparse_top1": int(s_idx[index, 0].item()),
+                "dense_top1": int(d_idx[index, 0].item()),
+                "margin": float((s_vals[index, 0] - s_vals[index, 1]).item()),
+                "dense_margin": float((d_vals[index, 0] - d_vals[index, 1]).item()),
+                "entropy": float(entropy[index].item()),
+                "draft_token": None if expected is None else int(expected),
+                "draft_agree": draft_agree,
+            }
+        )
+    return records
 
 
 def round_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Collapse a round's positions into the values the certificate decision uses."""
     if not records:
         raise ValueError("cannot summarize an empty round")
+    draft_judged = [record for record in records if record.get("draft_agree") is not None]
     return {
         "positions": len(records),
         "all_agree": all(bool(record["agree"]) for record in records),
@@ -123,6 +144,11 @@ def round_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "mean_margin": sum(float(record["margin"]) for record in records) / len(records),
         "max_entropy": max(float(record["entropy"]) for record in records),
         "mean_entropy": sum(float(record["entropy"]) for record in records) / len(records),
+        # The bonus row has no draft counterpart, so the conjunction covers the
+        # rows the draft actually proposed.
+        "draft_judged": len(draft_judged),
+        "all_draft_agree": bool(draft_judged) and all(bool(r["draft_agree"]) for r in draft_judged),
+        "draft_agreements": sum(1 for record in draft_judged if record["draft_agree"]),
     }
 
 
@@ -143,28 +169,45 @@ def default_thresholds(rounds: Sequence[Dict[str, Any]], count: int = 24) -> Lis
     return sorted(set(thresholds))
 
 
+CERTIFICATE_RULES = ("margin", "margin_and_draft")
+
+
 def certificate_curve(
     rounds: Sequence[Dict[str, Any]],
     thresholds: Sequence[float],
+    rule: str = "margin",
 ) -> List[Dict[str, Any]]:
-    """Coverage/precision of "certify a round when min sparse margin >= tau".
+    """Coverage/precision of a round-level certificate rule.
+
+    ``rule="margin"`` certifies when ``min sparse margin >= tau``.
+    ``rule="margin_and_draft"`` additionally requires that the sparse pass agreed
+    with the draft token at every position the draft proposed -- a second, free
+    opinion that a round is safe to skip.
 
     ``precision`` is the fraction of certified rounds whose every position really
     did agree with dense; ``coverage`` is the fraction of all rounds certified.
-    A certificate that skips dense verification must keep precision at 1.0 to
-    stay lossless, which is why the ceiling column is reported alongside.
+    A certificate that skips dense verification must keep precision at 1.0 to stay
+    lossless, which is why the ceiling column is reported alongside.
     """
+    if rule not in CERTIFICATE_RULES:
+        raise ValueError(f"unknown certificate rule {rule!r}; expected one of {CERTIFICATE_RULES}")
     if not rounds:
         raise ValueError("cannot build a certificate curve without rounds")
     total = len(rounds)
     ceiling = sum(1 for round in rounds if round["all_agree"]) / total
     rows: List[Dict[str, Any]] = []
     for threshold in thresholds:
-        certified = [round for round in rounds if float(round["min_margin"]) >= float(threshold)]
+        certified = [
+            round
+            for round in rounds
+            if float(round["min_margin"]) >= float(threshold)
+            and (rule == "margin" or bool(round.get("all_draft_agree")))
+        ]
         fired = len(certified)
         correct = sum(1 for round in certified if round["all_agree"])
         rows.append(
             {
+                "rule": rule,
                 "threshold": float(threshold),
                 "certified_rounds": fired,
                 "coverage": fired / total,
@@ -185,6 +228,82 @@ def select_operating_point(
     if not eligible:
         return None
     return max(eligible, key=lambda row: (row["coverage"], row["threshold"]))
+
+
+def heldout_operating_point(
+    rounds: Sequence[Dict[str, Any]],
+    rule: str = "margin",
+    min_precision: float = 1.0,
+) -> Dict[str, Any]:
+    """Choose the threshold on one fold and score it on the other, both ways.
+
+    Selecting the highest-coverage threshold at precision 1.0 on the same rounds
+    it is reported on is optimistic, and with tens of rounds the optimism is not
+    small.  A deterministic even/odd split gives an honest read on how much of the
+    strict coverage survives out of sample.
+    """
+    if len(rounds) < 4:
+        return {"rule": rule, "usable": False, "reason": "need at least 4 rounds to split"}
+    folds = ([rounds[index] for index in range(0, len(rounds), 2)],
+             [rounds[index] for index in range(1, len(rounds), 2)])
+    results = []
+    for train_index, test_index in ((0, 1), (1, 0)):
+        train, test = folds[train_index], folds[test_index]
+        curve = certificate_curve(train, default_thresholds(train), rule)
+        point = select_operating_point(curve, min_precision)
+        if point is None:
+            results.append({"threshold": None, "test_coverage": 0.0, "test_precision": 0.0,
+                            "test_wrong_skips": 0, "test_rounds": len(test)})
+            continue
+        threshold = point["threshold"]
+        certified = [
+            round
+            for round in test
+            if float(round["min_margin"]) >= threshold
+            and (rule == "margin" or bool(round.get("all_draft_agree")))
+        ]
+        correct = sum(1 for round in certified if round["all_agree"])
+        results.append(
+            {
+                "threshold": threshold,
+                "test_coverage": len(certified) / len(test),
+                "test_precision": (correct / len(certified)) if certified else 0.0,
+                "test_wrong_skips": len(certified) - correct,
+                "test_rounds": len(test),
+            }
+        )
+    return {
+        "rule": rule,
+        "usable": True,
+        "folds": results,
+        "mean_test_coverage": sum(item["test_coverage"] for item in results) / len(results),
+        "mean_test_precision": sum(item["test_precision"] for item in results) / len(results),
+        "total_test_wrong_skips": sum(item["test_wrong_skips"] for item in results),
+    }
+
+
+def projected_speedup(timing: Mapping[str, Any], coverage: float) -> Dict[str, Any]:
+    """End-to-end round cost of certified skipping at a given certificate rate.
+
+    A certified round skips the dense verification pass and the dense share of the
+    bonus step, but still pays the sparse pass and the sparse bonus.  The sparse
+    draft is paid in every round either way, which is why a high certificate rate
+    buys less than it first appears: the draft dominates the round.
+    """
+    draft = float(timing.get("draft_seconds", 0.0))
+    middle = float(timing.get("cached_sparse_pass_seconds", 0.0)) + float(timing.get("mask_prepare_seconds", 0.0))
+    dense = float(timing.get("dense_pass_seconds", 0.0))
+    dense_bonus = float(timing.get("dense_bonus_seconds", 0.0))
+    combined_bonus = float(timing.get("bonus_seconds", 0.0))
+    sparse_bonus = max(0.0, combined_bonus - dense_bonus)
+    static_seconds = draft + dense + combined_bonus
+    csv_seconds = draft + middle + sparse_bonus + (1.0 - float(coverage)) * (dense + dense_bonus)
+    return {
+        "coverage": float(coverage),
+        "static_seconds": static_seconds,
+        "csv_seconds": csv_seconds,
+        "speedup_vs_static": (static_seconds / csv_seconds) if csv_seconds > 0 else 0.0,
+    }
 
 
 def _cached_mask_sparse_attention_forward(
@@ -521,7 +640,10 @@ def certificate_probe_qwen25vl(
         dense_seconds += time.perf_counter() - t0
         dense_logits = dense_out.logits[0].detach()
 
-        records = position_records(sparse_logits, dense_logits)
+        # The row at position i predicts the token after draft[:i+1], i.e. draft[i+1].
+        # The final row predicts the bonus, which no draft proposed.
+        draft_next = [int(token) for token in draft[1:]] + [None]
+        records = position_records(sparse_logits, dense_logits, draft_next)
         summary = round_summary(records)
         summary["round"] = len(rounds)
         summary["block_len"] = block_len
@@ -651,34 +773,61 @@ def aggregate(stats_by_sample: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     total_positions = sum(round_row["positions"] for round_row in rounds)
     total_agreements = sum(round_row["agreements"] for round_row in rounds)
     thresholds = default_thresholds(rounds)
-    curve = certificate_curve(rounds, thresholds)
+    curves = {rule: certificate_curve(rounds, thresholds, rule) for rule in CERTIFICATE_RULES}
+    strict_points = {rule: select_operating_point(curve, min_precision=1.0) for rule, curve in curves.items()}
+    risk_points = {rule: select_operating_point(curve, min_precision=0.95) for rule, curve in curves.items()}
+    heldout = {rule: heldout_operating_point(rounds, rule, min_precision=1.0) for rule in CERTIFICATE_RULES}
+    timing = {
+        key: sum(float(stats.get(key, 0.0)) for stats in stats_by_sample)
+        for key in (
+            "draft_seconds",
+            "sparse_pass_seconds",
+            "cached_sparse_pass_seconds",
+            "dense_pass_seconds",
+            "bonus_seconds",
+            "dense_bonus_seconds",
+            "mask_prepare_seconds",
+            "per_layer_mask_build_seconds",
+            "mask_build_microbench_seconds",
+        )
+    }
+    ceiling = sum(1 for round_row in rounds if round_row["all_agree"]) / len(rounds)
+    projections = {"ceiling": projected_speedup(timing, ceiling)}
+    for rule in CERTIFICATE_RULES:
+        point = strict_points[rule]
+        held = heldout[rule]
+        projections[f"{rule}_strict"] = projected_speedup(
+            timing, float(point["coverage"]) if point else 0.0
+        )
+        projections[f"{rule}_heldout"] = projected_speedup(
+            timing, float(held.get("mean_test_coverage", 0.0)) if held.get("usable") else 0.0
+        )
     return {
         "rounds": len(rounds),
         "positions": total_positions,
         "position_agreement": total_agreements / total_positions,
-        "round_ceiling": sum(1 for round_row in rounds if round_row["all_agree"]) / len(rounds),
-        "curve": curve,
-        "strict_operating_point": select_operating_point(curve, min_precision=1.0),
-        "risk_operating_point": select_operating_point(curve, min_precision=0.95),
-        "timing": {
-            key: sum(float(stats.get(key, 0.0)) for stats in stats_by_sample)
-            for key in (
-                "draft_seconds",
-                "sparse_pass_seconds",
-                "cached_sparse_pass_seconds",
-                "dense_pass_seconds",
-                "bonus_seconds",
-                "dense_bonus_seconds",
-                "mask_prepare_seconds",
-                "per_layer_mask_build_seconds",
-                "mask_build_microbench_seconds",
-            )
-        },
+        "round_ceiling": ceiling,
+        "draft_position_agreement": (
+            sum(round_row.get("draft_agreements", 0) for round_row in rounds)
+            / max(1, sum(round_row.get("draft_judged", 0) for round_row in rounds))
+        ),
+        "curve": curves["margin"],
+        "curves": curves,
+        "strict_operating_point": strict_points["margin"],
+        "risk_operating_point": risk_points["margin"],
+        "strict_operating_points": strict_points,
+        "risk_operating_points": risk_points,
+        "heldout_operating_points": heldout,
+        "projections": projections,
+        "timing": timing,
         "cached_mask_hits": sum(int(stats.get("cached_mask_hits", 0)) for stats in stats_by_sample),
         "cached_mask_misses": sum(int(stats.get("cached_mask_misses", 0)) for stats in stats_by_sample),
         "per_layer_mask_builds": sum(int(stats.get("per_layer_mask_builds", 0)) for stats in stats_by_sample),
         "logit_mismatch_rounds": sum(int(stats.get("logit_mismatch_rounds", 0)) for stats in stats_by_sample),
         "max_logit_delta": max(
             (float(stats.get("max_logit_delta", 0.0)) for stats in stats_by_sample), default=0.0
+        ),
+        "reference_decoding_seconds": sum(
+            float(stats.get("reference_decoding_time", 0.0)) for stats in stats_by_sample
         ),
     }

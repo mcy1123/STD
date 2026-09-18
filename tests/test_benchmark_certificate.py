@@ -50,27 +50,51 @@ class TestGpuGuard:
             bc.require_usable_gpu(IDLE, 7, allow_shared=True, min_free_gib=1)
 
 
-def _aggregate(round_ceiling: float, strict, risk, curve):
+def _aggregate(round_ceiling, strict, risk, curve, heldout_coverage=0.0, heldout_precision=1.0):
     rounds = 10
+    heldout = {
+        rule: {
+            "rule": rule,
+            "usable": True,
+            "folds": [],
+            "mean_test_coverage": heldout_coverage,
+            "mean_test_precision": heldout_precision,
+            "total_test_wrong_skips": 0,
+        }
+        for rule in ("margin", "margin_and_draft")
+    }
+    points = {"margin": strict, "margin_and_draft": strict}
+    timing = {
+        "draft_seconds": 2.0,
+        "sparse_pass_seconds": 1.0,
+        "cached_sparse_pass_seconds": 0.4,
+        "dense_pass_seconds": 1.2,
+        "bonus_seconds": 0.2,
+        "dense_bonus_seconds": 0.1,
+        "mask_prepare_seconds": 0.01,
+        "per_layer_mask_build_seconds": 0.5,
+        "mask_build_microbench_seconds": 0.002,
+    }
     return {
         "rounds": rounds,
         "positions": 90,
         "position_agreement": 0.87,
+        "draft_position_agreement": 0.91,
         "round_ceiling": round_ceiling,
         "curve": curve,
+        "curves": {"margin": curve, "margin_and_draft": curve},
         "strict_operating_point": strict,
         "risk_operating_point": risk,
-        "timing": {
-            "draft_seconds": 2.0,
-            "sparse_pass_seconds": 1.0,
-            "cached_sparse_pass_seconds": 0.4,
-            "dense_pass_seconds": 1.2,
-            "bonus_seconds": 0.2,
-            "dense_bonus_seconds": 0.1,
-            "mask_prepare_seconds": 0.01,
-            "per_layer_mask_build_seconds": 0.5,
-            "mask_build_microbench_seconds": 0.002,
+        "strict_operating_points": points,
+        "risk_operating_points": points,
+        "heldout_operating_points": heldout,
+        "projections": {
+            "ceiling": {"coverage": round_ceiling, "static_seconds": 3.4, "csv_seconds": 3.0,
+                        "speedup_vs_static": 1.13},
+            "margin_strict": {"coverage": strict["coverage"] if strict else 0.0, "static_seconds": 3.4,
+                              "csv_seconds": 3.3, "speedup_vs_static": 1.03},
         },
+        "timing": timing,
         "cached_mask_hits": 280,
         "cached_mask_misses": 0,
         "per_layer_mask_builds": 280,
@@ -162,10 +186,40 @@ class TestViabilityVerdict:
         return [{"threshold": 1.0, "certified_rounds": 5, "coverage": coverage,
                  "precision": precision, "wrong_skips": 0}]
 
-    def test_open_and_reachable_when_strict_certificate_clears_the_rate(self):
+    def test_open_and_reachable_when_the_heldout_split_confirms_it(self):
         curve = self._curve(0.40, 1.0)
-        text = bc.render_report(_aggregate(0.87, curve[0], None, curve), sample_ids=["a"], args=_args())
+        text = bc.render_report(
+            _aggregate(0.87, curve[0], None, curve, heldout_coverage=0.40),
+            sample_ids=["a"], args=_args(),
+        )
         assert "OPEN AND REACHABLE" in text
+
+    def test_in_sample_only_when_the_split_misses_the_rate_by_a_little(self):
+        # required rate is 41/130 = 31.5%; in-sample 40%, held-out 31% -> below the
+        # rate but within the noise band, so the rule reports in-sample-only.
+        curve = self._curve(0.40, 1.0)
+        text = bc.render_report(
+            _aggregate(0.87, curve[0], None, curve, heldout_coverage=0.31),
+            sample_ids=["a"], args=_args(),
+        )
+        assert "OPEN, IN-SAMPLE ONLY" in text
+
+    def test_unresolved_when_the_split_disagrees_wildly(self):
+        curve = self._curve(0.40, 1.0)
+        text = bc.render_report(
+            _aggregate(0.87, curve[0], None, curve, heldout_coverage=0.05),
+            sample_ids=["a"], args=_args(),
+        )
+        assert "UNRESOLVED" in text
+        assert "sample too small" in text
+
+    def test_closed_by_magnitude_when_even_a_perfect_certificate_barely_helps(self):
+        curve = self._curve(0.40, 1.0)
+        aggregate = _aggregate(0.87, curve[0], None, curve, heldout_coverage=0.40)
+        aggregate["projections"]["ceiling"]["speedup_vs_static"] = 1.02
+        text = bc.render_report(aggregate, sample_ids=["a"], args=_args())
+        assert "CLOSED BY MAGNITUDE" in text
+        assert "cannot move this bound" in text
 
     def test_closed_when_the_ceiling_is_below_the_required_rate(self):
         curve = self._curve(0.10, 1.0)

@@ -32,14 +32,21 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+# Below this projected speedup the direction is closed on magnitude alone, however
+# good the certificate becomes: the certified share of a round is simply too small
+# a fraction of it to matter.
+MIN_WORTHWHILE_SPEEDUP = 1.05
+
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gpu", type=int, default=1)
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--data-path", required=True)
-    parser.add_argument("--video-root", required=True)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--from-jsonl", type=Path, default=None,
+                        help="re-render the report from a stored aggregate record instead of running the probe")
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument("--data-path", default=None)
+    parser.add_argument("--video-root", default=None)
+    parser.add_argument("--output", default=None, type=Path)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--frame-num", type=int, default=32)
     parser.add_argument("--max-new-tokens", type=int, default=64)
@@ -63,6 +70,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("invalid skip, target-k or cache-len")
     if args.gpu < 0:
         parser.error("gpu must be non-negative")
+    if args.from_jsonl is None:
+        for required in ("model_path", "data_path", "video_root", "output"):
+            if getattr(args, required) is None:
+                parser.error(f"--{required.replace('_', '-')} is required unless --from-jsonl is given")
     return args
 
 
@@ -161,32 +172,61 @@ def render_report(aggregate: Mapping[str, Any], *, sample_ids: Sequence[str], ar
         f"- position-level sparse/dense agreement: **{aggregate['position_agreement'] * 100:.2f}%**",
         f"- rounds where every position agreed (the certificate ceiling): "
         f"**{aggregate['round_ceiling'] * 100:.2f}%**",
+        f"- sparse/draft agreement at drafted positions: "
+        f"**{aggregate.get('draft_position_agreement', 0.0) * 100:.2f}%**",
         f"- rounds where the mask variants disagreed on logits: **{aggregate['logit_mismatch_rounds']}** "
         f"(max |delta| = {aggregate.get('max_logit_delta', 0.0):.3e}; the cached mask is an optimisation, "
         "not an approximation, so this must stay 0)",
         "",
     ]
+    lines.append("Operating points per certificate rule (thresholds chosen in sample, then held out on")
+    lines.append("a deterministic even/odd split of rounds so the strict coverage is not self-selected):")
+    lines.append("")
+    lines.append("| rule | strict threshold | in-sample coverage | held-out coverage | held-out precision | held-out wrong skips |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for rule in sorted(aggregate.get("strict_operating_points", {})):
+        point = aggregate["strict_operating_points"][rule]
+        held = aggregate.get("heldout_operating_points", {}).get(rule, {})
+        threshold = f"{point['threshold']:.3f}" if point else "n/a"
+        in_sample = f"{point['coverage'] * 100:.1f}%" if point else "0.0%"
+        if held.get("usable"):
+            held_cov = f"{held['mean_test_coverage'] * 100:.1f}%"
+            held_prec = f"{held['mean_test_precision'] * 100:.1f}%"
+            held_wrong = str(held["total_test_wrong_skips"])
+        else:
+            held_cov = held_prec = "n/a"
+            held_wrong = "n/a"
+        lines.append(f"| {rule} | {threshold} | {in_sample} | {held_cov} | {held_prec} | {held_wrong} |")
+    lines.append("")
     if strict:
         lines += [
-            f"- strict operating point (precision 1.00): margin >= {strict['threshold']:.3f} certifies "
-            f"**{strict['coverage'] * 100:.2f}%** of rounds with **{strict['wrong_skips']}** wrong skips",
+            f"- margin-only strict operating point (precision 1.00): margin >= {strict['threshold']:.3f} "
+            f"certifies **{strict['coverage'] * 100:.2f}%** of rounds with **{strict['wrong_skips']}** wrong skips",
         ]
     else:
-        lines.append("- strict operating point: **none** -- no margin threshold certifies any round without error")
-    if risk:
-        lines.append(
-            f"- 0.95-precision operating point: margin >= {risk['threshold']:.3f} certifies "
-            f"**{risk['coverage'] * 100:.2f}%** of rounds ({risk['wrong_skips']} wrong skips)"
-        )
+        lines.append("- margin-only strict operating point: **none** -- no margin threshold certifies any round")
     lines.append("")
-    lines.append("Selected curve rows (min-margin threshold -> coverage / precision):")
+    lines.append("Selected curve rows (margin-only rule):")
     lines.append("")
     lines.append("| margin >= | certified rounds | coverage | precision | wrong skips |")
     lines.append("|---:|---:|---:|---:|---:|")
     curve = aggregate["curve"]
     if curve:
-        step = max(1, len(curve) // 8)
+        step = max(1, len(curve) // 6)
         for row in curve[::step]:
+            lines.append(
+                f"| {row['threshold']:.3f} | {row['certified_rounds']} | {row['coverage'] * 100:.1f}% | "
+                f"{row['precision'] * 100:.1f}% | {row['wrong_skips']} |"
+            )
+    lines.append("")
+    lines.append("Selected curve rows (margin AND sparse/draft agreement rule):")
+    lines.append("")
+    lines.append("| margin >= | certified rounds | coverage | precision | wrong skips |")
+    lines.append("|---:|---:|---:|---:|---:|")
+    combined_curve = aggregate.get("curves", {}).get("margin_and_draft", [])
+    if combined_curve:
+        step = max(1, len(combined_curve) // 6)
+        for row in combined_curve[::step]:
             lines.append(
                 f"| {row['threshold']:.3f} | {row['certified_rounds']} | {row['coverage'] * 100:.1f}% | "
                 f"{row['precision'] * 100:.1f}% | {row['wrong_skips']} |"
@@ -227,33 +267,109 @@ def render_report(aggregate: Mapping[str, Any], *, sample_ids: Sequence[str], ar
     required = cached_gate["required_skip_rate"]
     ceiling = float(aggregate["round_ceiling"])
     strict_coverage = float(strict["coverage"]) if strict else 0.0
-    if required >= 1.0:
+    heldout_points = aggregate.get("heldout_operating_points", {})
+    usable_heldout = [point for point in heldout_points.values() if point.get("usable")]
+    best_heldout = max((float(point.get("mean_test_coverage", 0.0)) for point in usable_heldout), default=0.0)
+    heldout_wrong_skips = sum(int(point.get("total_test_wrong_skips", 0)) for point in usable_heldout)
+    # Coverage at less than perfect precision is not a lossless certificate, so a
+    # held-out operating point only counts if it emitted no wrong tokens.
+    heldout_clean = heldout_wrong_skips == 0 and bool(usable_heldout)
+    projections = aggregate.get("projections", {})
+    ceiling_speedup = float(projections.get("ceiling", {}).get("speedup_vs_static", 0.0))
+    # The dense pass plus its bonus is only the *verifiable* share of a round; the
+    # sparse draft is paid either way.  Whatever the certificate achieves, the
+    # speedup is bounded by static/(draft + middle + sparse bonus), so a ceiling
+    # below this threshold closes the direction on magnitude alone -- no amount of
+    # certificate engineering can move that bound.
+    if ceiling_speedup and ceiling_speedup < MIN_WORTHWHILE_SPEEDUP:
+        verdict = (
+            f"**CLOSED BY MAGNITUDE.** Even a certificate firing on every round yields only "
+            f"{ceiling_speedup:.3f}x over static STD, because the certified part of the round is small: "
+            "the sparse draft is paid every round regardless. Certificate quality cannot move this bound."
+        )
+    elif required >= 1.0:
         verdict = ("**CLOSED.** Even a certificate that fires on every round cannot pay for the middle pass "
                    "at this configuration.")
     elif ceiling < required:
         verdict = ("**CLOSED.** The round-level ceiling sits below the required rate, so no certificate "
                    "computable from the sparse pass alone can pay for the middle pass.")
+    elif heldout_clean and best_heldout >= required:
+        verdict = ("**OPEN AND REACHABLE.** A precision-1.0 certificate already clears the required rate on "
+                   "held-out rounds with no wrong skips, so the middle level can be built losslessly.")
+    elif abs(best_heldout - strict_coverage) > 0.10:
+        verdict = ("**UNRESOLVED (sample too small).** In-sample and held-out strict coverage disagree by more "
+                   "than ten points, and the held-out threshold emitted "
+                   f"{heldout_wrong_skips} wrong skip(s); at this round count that is threshold-selection "
+                   "noise rather than evidence, so more rounds are needed before either number is trusted.")
     elif strict_coverage >= required:
-        verdict = ("**OPEN AND REACHABLE.** A precision-1.0 certificate on the top-1 margin alone already "
-                   "clears the required rate, so the middle level can be built losslessly.")
+        verdict = ("**OPEN, IN-SAMPLE ONLY.** A precision-1.0 certificate clears the required rate on the "
+                   "rounds its threshold was chosen on, but not out of sample; treat as unreached until a "
+                   "held-out split reproduces it.")
     else:
         verdict = ("**OPEN BUT NOT YET REACHED.** The mechanism is economically viable, but the best "
-                   "precision-1.0 margin certificate covers less than the required rate; either a stronger "
+                   "precision-1.0 certificate covers less than the required rate; either a stronger "
                    "certificate statistic or a configuration with a larger dense saving is needed.")
     lines += [
         "## D. Is the mechanism viable?",
         "",
         f"- required certificate rate (mask-cached middle pass): **{required * 100:.0f}%**",
         f"- round-level ceiling: **{ceiling * 100:.1f}%**",
-        f"- best precision-1.0 certificate coverage: **{strict_coverage * 100:.1f}%**",
+        f"- best precision-1.0 coverage, in sample: **{strict_coverage * 100:.1f}%**",
+        f"- best precision-1.0 coverage, held out: **{best_heldout * 100:.1f}%** "
+        f"(wrong skips on held-out folds: **{heldout_wrong_skips}**)",
+        f"- best achievable speedup vs static STD (certificate fires on every round): "
+        f"**{ceiling_speedup:.3f}x**",
         f"- {verdict}",
         "",
     ]
+    if projections:
+        lines.append("## E. Projected end-to-end effect")
+        lines.append("")
+        lines.append("Every round still pays the sparse draft, so the projection is bounded by how small the")
+        lines.append("verifiable part of the round is:")
+        lines.append("")
+        lines.append("| certificate rate | projected round (ms) | static round (ms) | speedup vs static STD |")
+        lines.append("|---:|---:|---:|---:|")
+        for name in sorted(projections):
+            row = projections[name]
+            lines.append(
+                f"| {row['coverage'] * 100:.1f}% ({name}) | {row['csv_seconds'] / rounds * 1000:.1f} | "
+                f"{row['static_seconds'] / rounds * 1000:.1f} | **{row['speedup_vs_static']:.3f}x** |"
+            )
+        lines.append("")
     return "\n".join(lines)
+
+
+def load_aggregate(path: Path) -> dict:
+    """Read the stored aggregate record so a report can be re-rendered offline.
+
+    The verdict rules in this file change as the analysis matures, and re-running
+    a multi-minute GPU probe to re-print a table would be wasteful and would also
+    make the report unreproducible from committed evidence.
+    """
+    import json
+
+    with Path(path).open() as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("kind") == "aggregate":
+                return row
+    raise ValueError(f"no aggregate record in {path}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
+    if args.from_jsonl is not None:
+        aggregate = load_aggregate(args.from_jsonl)
+        report = render_report(aggregate, sample_ids=aggregate.get("sample_ids", []), args=args)
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(report + "\n")
+        print(report)
+        return
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -282,6 +398,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if len(samples) != args.limit:
         raise RuntimeError(f"requested {args.limit} samples, found {len(samples)}")
 
+    assert args.output is not None
     args.output.parent.mkdir(parents=True, exist_ok=True)
     source_paths = [
         "scripts/benchmark_certificate.py", "scripts/benchmark_std.py",
@@ -335,6 +452,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             stats["sample_id"] = sample["sample_id"]
             stats["probe_matches_ar"] = probe_tokens == reference_tokens
             stats["probe_token_count"] = len(probe_tokens)
+            stats["reference_decoding_time"] = float(reference.decoding_time)
+            stats["probe_decoding_time"] = float(result.decoding_time)
             stats["probe_tokens"] = probe_tokens
             stats["reference_tokens"] = reference_tokens
             stats["first_mismatch_index"] = next(
@@ -353,6 +472,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         pooled = aggregate(stats_by_sample)
         mismatches = [s["sample_id"] for s in stats_by_sample if not s["probe_matches_ar"]]
         pooled["probe_mismatch_samples"] = mismatches
+        pooled["sample_ids"] = sample_ids
         emit({"kind": "aggregate", **pooled})
         report = render_report(pooled, sample_ids=sample_ids, args=args)
         if args.report:

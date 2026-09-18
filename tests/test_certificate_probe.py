@@ -203,3 +203,134 @@ class TestAggregate:
             cp.aggregate([])
         with pytest.raises(ValueError):
             cp.aggregate([{"sample_id": "a", "rounds": []}])
+
+
+class TestDraftAgreement:
+    """Sparse/draft agreement is the second free opinion the conjunction rule uses."""
+
+    def test_records_draft_agreement_per_position(self):
+        block = logits([10.0, 0.0], [0.0, 10.0], [5.0, 0.0])
+        # position 0 predicts draft[1]=0 (sparse top1 is 0 -> agrees)
+        # position 1 predicts draft[2]=1 (sparse top1 is 1 -> agrees)
+        # position 2 predicts the bonus, which no draft proposed
+        records = cp.position_records(block, block.clone(), [0, 1, None])
+        assert [record["draft_agree"] for record in records] == [True, True, None]
+
+    def test_disagreement_is_recorded(self):
+        sparse = logits([0.0, 10.0])
+        records = cp.position_records(sparse, sparse.clone(), [3])
+        assert records[0]["draft_agree"] is False
+
+    def test_length_mismatch_is_rejected(self):
+        with pytest.raises(ValueError):
+            cp.position_records(logits([1.0, 0.0]), logits([1.0, 0.0]), [1, 2])
+
+    def test_round_summary_excludes_the_bonus_row_from_the_conjunction(self):
+        summary = cp.round_summary(
+            [
+                {"agree": True, "margin": 3.0, "entropy": 0.1, "draft_agree": True},
+                {"agree": True, "margin": 3.0, "entropy": 0.1, "draft_agree": None},
+            ]
+        )
+        assert summary["all_draft_agree"] is True
+        assert summary["draft_judged"] == 1
+
+    def test_round_summary_fails_the_conjunction_on_one_disagreement(self):
+        summary = cp.round_summary(
+            [
+                {"agree": True, "margin": 3.0, "entropy": 0.1, "draft_agree": True},
+                {"agree": True, "margin": 3.0, "entropy": 0.1, "draft_agree": False},
+            ]
+        )
+        assert summary["all_draft_agree"] is False
+
+    def test_round_with_no_drafted_positions_is_not_certified(self):
+        summary = cp.round_summary([{"agree": True, "margin": 3.0, "entropy": 0.1, "draft_agree": None}])
+        assert summary["all_draft_agree"] is False
+
+
+def _round(min_margin, all_agree, all_draft_agree=True):
+    return {"min_margin": min_margin, "all_agree": all_agree, "all_draft_agree": all_draft_agree}
+
+
+class TestConjunctionRule:
+    def test_conjunction_can_only_remove_rounds(self):
+        rounds = [_round(5.0, True, True), _round(5.0, True, False), _round(1.0, False, True)]
+        loose = cp.certificate_curve(rounds, [0.0], "margin")
+        strict = cp.certificate_curve(rounds, [0.0], "margin_and_draft")
+        assert loose[0]["certified_rounds"] == 3
+        assert strict[0]["certified_rounds"] == 2
+
+    def test_conjunction_removes_a_wrong_skip(self):
+        rounds = [_round(5.0, True, True), _round(5.0, False, False)]
+        loose = cp.certificate_curve(rounds, [0.0], "margin")[0]
+        strict = cp.certificate_curve(rounds, [0.0], "margin_and_draft")[0]
+        assert loose["precision"] == pytest.approx(0.5)
+        assert strict["precision"] == pytest.approx(1.0)
+        assert strict["wrong_skips"] == 0
+
+    def test_unknown_rule_is_rejected(self):
+        with pytest.raises(ValueError):
+            cp.certificate_curve([_round(1.0, True)], [0.0], "nonsense")
+
+
+class TestHeldoutOperatingPoint:
+    def test_threshold_is_chosen_on_one_fold_and_scored_on_the_other(self):
+        # Margins alternate so the even fold is clean and the odd fold is not.
+        rounds = []
+        for index in range(8):
+            if index % 2 == 0:
+                rounds.append(_round(9.0, True))
+            else:
+                rounds.append(_round(9.0, False))
+        result = cp.heldout_operating_point(rounds, "margin", min_precision=1.0)
+        assert result["usable"] is True
+        assert len(result["folds"]) == 2
+        # every fold's test half is the contaminated odd fold, so precision is 0
+        assert result["mean_test_precision"] == pytest.approx(0.0)
+        assert result["total_test_wrong_skips"] > 0
+
+    def test_too_few_rounds_is_reported_not_guessed(self):
+        result = cp.heldout_operating_point([_round(1.0, True)], "margin")
+        assert result["usable"] is False
+        assert "reason" in result
+
+    def test_clean_rounds_survive_out_of_sample(self):
+        rounds = [_round(9.0, True) for _ in range(8)]
+        result = cp.heldout_operating_point(rounds, "margin", min_precision=1.0)
+        assert result["mean_test_coverage"] == pytest.approx(1.0)
+        assert result["total_test_wrong_skips"] == 0
+
+
+class TestProjection:
+    def _timing(self):
+        return {
+            "draft_seconds": 2.0,
+            "cached_sparse_pass_seconds": 0.3,
+            "mask_prepare_seconds": 0.0,
+            "dense_pass_seconds": 0.6,
+            "dense_bonus_seconds": 0.2,
+            "bonus_seconds": 0.5,
+        }
+
+    def test_zero_coverage_is_static_plus_the_middle_pass(self):
+        row = cp.projected_speedup(self._timing(), 0.0)
+        # static = 2.0 + 0.6 + 0.5 = 3.1 ; csv = 2.0 + 0.3 + 0.3 + 0.8 = 3.4
+        assert row["static_seconds"] == pytest.approx(3.1)
+        assert row["csv_seconds"] == pytest.approx(3.4)
+        assert row["speedup_vs_static"] < 1.0
+
+    def test_full_coverage_keeps_only_the_sparse_bonus(self):
+        row = cp.projected_speedup(self._timing(), 1.0)
+        assert row["csv_seconds"] == pytest.approx(2.0 + 0.3 + 0.3)
+        assert row["speedup_vs_static"] > 1.0
+
+    def test_speedup_is_monotonic_in_coverage(self):
+        rates = [cp.projected_speedup(self._timing(), c)["speedup_vs_static"] for c in (0.0, 0.3, 0.6, 1.0)]
+        assert rates == sorted(rates)
+
+    def test_draft_dominates_so_the_upside_is_bounded(self):
+        # Even skipping every dense pass cannot beat draft + middle, so the ceiling
+        # speedup is static/(draft+middle+sparse_bonus).
+        row = cp.projected_speedup(self._timing(), 1.0)
+        assert row["speedup_vs_static"] == pytest.approx(3.1 / 2.6, rel=1e-6)
