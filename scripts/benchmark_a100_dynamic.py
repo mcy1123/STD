@@ -52,6 +52,22 @@ def parse_args():
     p.add_argument("--bootstrap-window-tokens", type=int, default=0,
                    help="0 infers one temporal slice from video_grid_thw")
     p.add_argument("--bootstrap-layer-stride", type=int, default=1)
+    p.add_argument(
+        "--assert-equal-s0",
+        action="store_true",
+        help=(
+            "T2: fail the run unless the dynamic method starts from exactly the same "
+            "initial selection as static (required for a clean paired comparison)."
+        ),
+    )
+    p.add_argument(
+        "--assert-consistency",
+        action="store_true",
+        help=(
+            "T1: after every sparse-cache refresh, verify the compact prompt still "
+            "matches the canonical dense KV at the selected positions."
+        ),
+    )
     p.add_argument("--profile-components", action="store_true",
                    help="record synchronized prefill/decode component timings")
     p.add_argument("--max-rss-gib", type=float, default=48)
@@ -89,6 +105,15 @@ def start_memory_guard(max_rss_gib):
                 return
             time.sleep(0.5)
     threading.Thread(target=monitor, daemon=True).start()
+
+
+def selection_digest(selection) -> str:
+    """Stable digest of an initial visual selection (T2 equal-S_0 check)."""
+    hasher = hashlib.sha256()
+    for layer_positions in selection.topk_positions:
+        hasher.update(layer_positions.detach().to("cpu").contiguous().numpy().tobytes())
+    hasher.update(str(int(selection.k)).encode())
+    return hasher.hexdigest()[:16]
 
 
 def main():
@@ -177,6 +202,7 @@ def main():
                 shift = (idx + max(repeat, 0)) % len(methods)
                 order = methods[shift:] + methods[:shift]
                 trial_results = {}
+                trial_digests = {}
                 for method in order:
                     gc.collect()
                     torch.cuda.empty_cache()
@@ -186,6 +212,7 @@ def main():
                                   profile_prefill=args.profile_components)
                     print(f"RUN {sample['sample_id']} {phase} repeat={repeat} {method}", flush=True)
                     dynamic_stats = None
+                    digest = None
                     if method == "ar":
                         result = ar_generate_qwen25vl(model, inputs, VIDEO_TOKEN_ID, eos, **common)
                     else:
@@ -200,6 +227,7 @@ def main():
                                 model, inputs, VIDEO_TOKEN_ID, eos, policy="previous_verify_topk",
                                 collector_version=args.dynamic_collector,
                                 refresh_mode=args.refresh_mode,
+                                assert_selection_cache_consistency=args.assert_consistency,
                                 selection_update_interval=args.selection_update_interval,
                                 min_selection_change_ratio=args.min_selection_change_ratio,
                                 query_mode=args.dynamic_query_mode,
@@ -209,7 +237,9 @@ def main():
                                 bootstrap_window_tokens=args.bootstrap_window_tokens,
                                 bootstrap_layer_stride=args.bootstrap_layer_stride,
                                 **common)
+                        digest = selection_digest(selection)
                         del selection
+                    trial_digests[method] = digest
                     torch.cuda.synchronize()
                     suffix = result.output_ids[:, prompt_len:].detach().cpu()
                     rec = {"kind": "trial", "sample_id": sample["sample_id"], "phase": phase,
@@ -231,6 +261,7 @@ def main():
                            "verify_time": result.verify_time,
                            "bonus_time": result.bonus_time,
                            "cache_adjust_time": result.cache_adjust_time,
+                           "initial_selection_digest": digest,
                            "output_tokens": suffix.tolist()[0]}
                     if dynamic_stats is not None:
                         rec["dynamic_stats"] = dynamic_stats
@@ -243,6 +274,23 @@ def main():
 
                 ref = trial_results["ar"]
                 static = trial_results["static"]
+                # T2: with the attention bootstrap the dynamic method must start
+                # from exactly the static S_0, otherwise the paired accept delta
+                # is confounded by a different initial selection.
+                equal_s0 = {}
+                for method in [m for m in methods if m.startswith("dynamic_")]:
+                    same = trial_digests.get(method) == trial_digests.get("static")
+                    equal_s0[method] = same
+                    if (
+                        args.assert_equal_s0
+                        and args.dynamic_bootstrap == "attention"
+                        and not same
+                    ):
+                        raise RuntimeError(
+                            f"T2 violated: {method} S_0 digest {trial_digests.get(method)} != "
+                            f"static {trial_digests.get('static')} on "
+                            f"{sample['sample_id']} repeat={repeat}"
+                        )
                 for method in methods[1:]:
                     rec, suffix = trial_results[method]
                     metrics = positional_token_metrics(ref[1], suffix)
@@ -252,7 +300,8 @@ def main():
                                "decode_speedup_vs_ar": ref[0]["decoding_time"] / rec["decoding_time"],
                                "decode_speedup_vs_static": static[0]["decoding_time"] / rec["decoding_time"],
                                "inference_speedup_vs_ar": ref[0]["inference_time"] / rec["inference_time"],
-                               "inference_speedup_vs_static": static[0]["inference_time"] / rec["inference_time"]}
+                               "inference_speedup_vs_static": static[0]["inference_time"] / rec["inference_time"],
+                               "equal_s0": equal_s0.get(method)}
                     emit(summary)
                     print(json.dumps(summary), flush=True)
             del inputs, trial_results

@@ -75,6 +75,8 @@ run_case() {
     --k-plus-text 1024 \
     --dynamic-collector v2 \
     --profile-components \
+    --assert-equal-s0 \
+    --assert-consistency \
     "$@"
   "$PY" "$REPO/scripts/summarize_a100_dynamic.py" "$out" --output-dir "$OUTDIR"
   echo "[$name] report: $OUTDIR/${name}_report.md"

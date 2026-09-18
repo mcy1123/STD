@@ -78,6 +78,58 @@ def refresh_sparse_visual_kv(
     return time.perf_counter() - t0
 
 
+def verify_sparse_visual_consistency(
+    sparse_past_key_values,
+    dense_past_key_values,
+    non_visual_positions: torch.Tensor,
+    topk: torch.Tensor,
+    k: int,
+) -> int:
+    """Count (layer, head) entries whose compact prompt KV does not match `topk`.
+
+    The compact prompt must contain exactly the KV of
+    ``non_visual_positions ∪ topk[head]``. A disagreement means the routing state
+    and the cache contents have drifted apart -- the failure mode that silently
+    degrades the sparse draft without changing any logit the verifier sees.
+
+    The comparison is **order-independent on purpose**: the full rebuild writes a
+    sorted layout, while the incremental refresh preserves original slot numbers
+    and therefore produces a non-sorted one. Only the *content set* is
+    load-bearing, because the sparse draft attends with ``is_causal=False`` and
+    RoPE is already baked into the keys.
+
+    Returns the number of mismatching ``(layer, head)`` entries. Debug invariant,
+    not part of the hot path.
+    """
+    compact_len = int(non_visual_positions.numel()) + k
+    non_visual = non_visual_positions
+    mismatches = 0
+    for layer_idx, layer_cache in enumerate(sparse_past_key_values):
+        layer_topk = topk[layer_idx]                       # [kv_heads, k]
+        dense_layer = dense_past_key_values[layer_idx]
+        for cache, dense_cache in zip(layer_cache, dense_layer):
+            data = cache.data
+            ddata = dense_cache.data
+            kv_heads = int(data.shape[1])
+            if int(layer_topk.shape[0]) != kv_heads:
+                raise ValueError(
+                    f"top-K head count {layer_topk.shape[0]} != cache heads {kv_heads}"
+                )
+            for head in range(kv_heads):
+                idx = torch.unique(
+                    torch.cat([non_visual, layer_topk[head].cpu()]), sorted=True
+                ).to(ddata.device)
+                if int(idx.numel()) != compact_len:
+                    raise RuntimeError(
+                        "Compact index length does not match k + non-visual positions."
+                    )
+                required = torch.unique(ddata[0, head, idx, :], dim=0, sorted=True)
+                present = torch.unique(data[0, head, :compact_len, :], dim=0, sorted=True)
+                if required.shape != present.shape or not torch.equal(required, present):
+                    mismatches += 1
+    return mismatches
+
+
 def count_changed_tokens(old_topk: torch.Tensor, new_topk: torch.Tensor) -> float:
     """Mean number of visual tokens replaced per (layer, head) when going
     from ``old_topk`` to ``new_topk`` (both ``[num_layers, kv_heads, k]``)."""

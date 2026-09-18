@@ -40,6 +40,7 @@ from std_repro.sparse_cache_refresh import (
     count_changed_tokens,
     incremental_refresh_sparse_visual_kv,
     refresh_sparse_visual_kv,
+    verify_sparse_visual_consistency,
 )
 from std_repro.std_qwen25vl import (
     GenerateResult,
@@ -122,6 +123,7 @@ def dynamic_std_generate_qwen25vl(
     ignore_eos: bool = False,
     collector_version: str = "v2",
     refresh_mode: str = "incremental",
+    assert_selection_cache_consistency: bool = False,
     selection_update_interval: int = 1,
     min_selection_change_ratio: float = 0.05,
     query_mode: str = "three",
@@ -276,6 +278,8 @@ def dynamic_std_generate_qwen25vl(
     refresh_records: List[Dict] = []
     selection_update_time = 0.0
     skipped_selection_updates = 0
+    consistency_checks = 0
+    consistency_mismatches = 0
     fallback_count = 0
     fallback_accepted_extra = 0
     verify_margin_reruns = 0
@@ -396,6 +400,7 @@ def dynamic_std_generate_qwen25vl(
                 update_time=candidate_state.update_time,
             )
         refresh_time = 0.0
+        cache_consistent = None
         if policy == "previous_verify_topk" and not torch.equal(state.indices, new_state.indices):
             if refresh_mode == "incremental":
                 refresh_time = incremental_refresh_sparse_visual_kv(
@@ -405,6 +410,22 @@ def dynamic_std_generate_qwen25vl(
                 refresh_time = refresh_sparse_visual_kv(
                     sparse_pkv, dense_pkv, non_visual_positions, new_state.indices, k
                 )
+            # T1 invariant: the refreshed compact prompt must equal the canonical
+            # dense KV at the selected positions. A mismatch means the routing
+            # state and the cache contents drifted apart, which silently degrades
+            # the draft without changing any verifier logit.
+            if assert_selection_cache_consistency:
+                consistency_checks += 1
+                mismatches = verify_sparse_visual_consistency(
+                    sparse_pkv, dense_pkv, non_visual_positions, new_state.indices, k
+                )
+                consistency_mismatches += mismatches
+                cache_consistent = mismatches == 0
+                if mismatches:
+                    raise RuntimeError(
+                        f"selection/cache drift at round {decode_rounds}: {mismatches} "
+                        "compact slots disagree with the canonical dense cache"
+                    )
         refresh_records.append(
             {
                 "round_id": decode_rounds,
@@ -413,6 +434,7 @@ def dynamic_std_generate_qwen25vl(
                 "changed_tokens": float(count_changed_tokens(state.indices, new_state.indices)),
                 "refresh_time_ms": float(refresh_time * 1000.0),
                 "update_applied": bool(accept_update),
+                "cache_consistent": cache_consistent,
                 "query_positions": query_positions,
                 "query_mode_effective": query_mode if collector_version == "v2" else "all",
             }
@@ -512,6 +534,24 @@ def dynamic_std_generate_qwen25vl(
         "mean_refresh_time_ms": float(sum(refresh_ms) / len(refresh_ms)) if refresh_ms else 0.0,
         "total_selection_update_time_ms": float(selection_update_time * 1000.0),
         "skipped_selection_updates": skipped_selection_updates,
+        # T3: the applied ratio is what actually reached the sparse cache. With
+        # interval=1 it should be ~1.0; with interval=4 only ~0.25 of rounds are
+        # even eligible, and hysteresis can suppress more (the A100 interval4 run
+        # applied just 5/23). Reporting it prevents misreading a throttled run as
+        # a full-strength dynamic run.
+        "selection_updates_eligible": sum(
+            1 for r in refresh_records if r.get("query_positions") is not None
+        ),
+        "selection_updates_applied": sum(
+            1 for r in refresh_records if r.get("update_applied")
+        ),
+        "selection_update_applied_ratio": (
+            sum(1 for r in refresh_records if r.get("update_applied")) / len(refresh_records)
+            if refresh_records
+            else 0.0
+        ),
+        "consistency_checks": consistency_checks,
+        "consistency_mismatches": consistency_mismatches,
         "collector_time_synchronized": collector_version in {"v1", "v2"},
     }
     return result, selection, dynamic_stats

@@ -12,6 +12,7 @@ import torch
 from std_repro.sparse_cache_refresh import (
     incremental_refresh_sparse_visual_kv,
     refresh_sparse_visual_kv,
+    verify_sparse_visual_consistency,
 )
 
 
@@ -171,3 +172,68 @@ def test_full_refresh_resets_layout_before_a_later_incremental_refresh():
     _assert_prompt_sets(sparse, dense, non_visual, initial)
     _assert_fixed_slots_unchanged(sparse, fixed)
     _assert_tail_unchanged(sparse, tail, compact_len)
+
+
+# ---- T1: selection/cache consistency invariant ----------------------------
+
+
+def test_verify_consistency_accepts_a_freshly_built_cache():
+    non_visual, initial, _, _ = _selections()
+    dense, sparse = _caches(initial, non_visual)
+
+    assert verify_sparse_visual_consistency(
+        sparse, dense, non_visual, initial, initial.shape[-1]
+    ) == 0
+
+
+def test_verify_consistency_detects_a_single_corrupted_slot():
+    non_visual, initial, _, _ = _selections()
+    dense, sparse = _caches(initial, non_visual)
+    sparse[0][0].data[0, 0, 0, 0] += 1
+
+    assert verify_sparse_visual_consistency(
+        sparse, dense, non_visual, initial, initial.shape[-1]
+    ) == 1
+
+
+def test_verify_consistency_detects_a_stale_selection():
+    """Cache still holds `initial` while the routing state claims `first`."""
+    non_visual, initial, first, _ = _selections()
+    dense, sparse = _caches(initial, non_visual)
+
+    assert verify_sparse_visual_consistency(
+        sparse, dense, non_visual, first, first.shape[-1]
+    ) > 0
+
+
+def test_verify_consistency_passes_after_a_full_refresh():
+    non_visual, initial, first, _ = _selections()
+    dense, sparse = _caches(initial, non_visual)
+    refresh_sparse_visual_kv(sparse, dense, non_visual, first, first.shape[-1])
+
+    assert verify_sparse_visual_consistency(
+        sparse, dense, non_visual, first, first.shape[-1]
+    ) == 0
+
+
+def test_verify_consistency_passes_after_an_incremental_refresh():
+    non_visual, initial, first, _ = _selections()
+    dense, sparse = _caches(initial, non_visual)
+    incremental_refresh_sparse_visual_kv(
+        sparse, dense, non_visual, initial, first, first.shape[-1]
+    )
+
+    assert verify_sparse_visual_consistency(
+        sparse, dense, non_visual, first, first.shape[-1]
+    ) == 0
+
+
+def test_verify_consistency_rejects_a_head_count_mismatch():
+    non_visual, initial, _, _ = _selections()
+    dense, sparse = _caches(initial, non_visual)
+    fewer_heads = initial[:, :1, :]
+
+    with pytest.raises(ValueError):
+        verify_sparse_visual_consistency(
+            sparse, dense, non_visual, fewer_heads, initial.shape[-1]
+        )
