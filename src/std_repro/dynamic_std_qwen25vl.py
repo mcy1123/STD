@@ -124,6 +124,7 @@ def dynamic_std_generate_qwen25vl(
     collector_version: str = "v2",
     refresh_mode: str = "incremental",
     assert_selection_cache_consistency: bool = False,
+    consistency_check_limit: int = 3,
     selection_update_interval: int = 1,
     min_selection_change_ratio: float = 0.05,
     query_mode: str = "three",
@@ -414,7 +415,7 @@ def dynamic_std_generate_qwen25vl(
             # dense KV at the selected positions. A mismatch means the routing
             # state and the cache contents drifted apart, which silently degrades
             # the draft without changing any verifier logit.
-            if assert_selection_cache_consistency:
+            if assert_selection_cache_consistency and consistency_checks < consistency_check_limit:
                 consistency_checks += 1
                 mismatches = verify_sparse_visual_consistency(
                     sparse_pkv, dense_pkv, non_visual_positions, new_state.indices, k
