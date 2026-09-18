@@ -1,0 +1,57 @@
+[13:19:28] waiting for a GPU with >=26 GiB free (cache-len 20480)
+[13:19:29] attempt 1: GPU 2 qualifies; warming cache
+[13:28:30] cache warm; starting R1 on GPU 2
+[13:34:41] R1 attempt finished rc=1
+[13:34:41] retrying after failure
+[13:35:41] attempt 2: GPU 2 qualifies; warming cache
+[13:36:28] cache warm; starting R1 on GPU 2
+[13:38:54] R1 attempt finished rc=1
+[13:38:54] retrying after failure
+[13:39:55] attempt 3: GPU 2 qualifies; warming cache
+[13:39:59] cache warm; starting R1 on GPU 2
+[13:40:36] R1 attempt finished rc=1
+[13:40:36] retrying after failure
+[13:41:36] attempt 4: GPU 2 qualifies; warming cache
+[13:41:37] cache warm; starting R1 on GPU 2
+[13:42:09] R1 attempt finished rc=1
+[13:42:09] retrying after failure
+[13:43:10] attempt 5: GPU 2 qualifies; warming cache
+[13:43:11] cache warm; starting R1 on GPU 2
+[13:43:47] R1 attempt finished rc=1
+[13:43:47] retrying after failure
+[13:44:47] attempt 6: GPU 2 qualifies; warming cache
+[13:44:48] cache warm; starting R1 on GPU 2
+[13:45:20] R1 attempt finished rc=1
+[13:45:20] retrying after failure
+[13:46:20] attempt 7: GPU 2 qualifies; warming cache
+[13:46:21] cache warm; starting R1 on GPU 2
+[13:46:56] R1 attempt finished rc=1
+[13:46:56] retrying after failure
+[13:47:56] attempt 8: GPU 2 qualifies; warming cache
+[13:47:57] cache warm; starting R1 on GPU 2
+[13:48:27] R1 attempt finished rc=1
+[13:48:27] retrying after failure
+[13:49:27] attempt 9: GPU 2 qualifies; warming cache
+[13:49:28] cache warm; starting R1 on GPU 2
+[13:50:00] R1 attempt finished rc=1
+[13:50:00] retrying after failure
+[13:51:00] attempt 10: GPU 2 qualifies; warming cache
+[13:51:01] cache warm; starting R1 on GPU 2
+[13:51:31] R1 attempt finished rc=1
+[13:51:31] retrying after failure
+[13:52:31] attempt 11: GPU 2 qualifies; warming cache
+[13:52:32] cache warm; starting R1 on GPU 2
+[13:53:02] R1 attempt finished rc=1
+[13:53:02] retrying after failure
+[13:54:02] attempt 12: GPU 2 qualifies; warming cache
+[13:54:03] cache warm; starting R1 on GPU 2
+[13:54:32] R1 attempt finished rc=1
+[13:54:32] retrying after failure
+[13:55:32] attempt 13: GPU 2 qualifies; warming cache
+[13:55:33] cache warm; starting R1 on GPU 2
+[13:56:03] R1 attempt finished rc=1
+[13:56:03] retrying after failure
+[13:57:03] attempt 14: GPU 0 qualifies; warming cache
+[13:57:04] cache warm; starting R1 on GPU 0
+[14:43:50] R1 attempt finished rc=0
+[14:43:50] R1_EXIT=0
