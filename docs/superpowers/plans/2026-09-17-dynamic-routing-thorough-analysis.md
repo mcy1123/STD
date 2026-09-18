@@ -329,3 +329,58 @@ A100 上 `dynamic < static` **不能**再归因于 collector 子采样（H3 否�
 `results/routing_analysis_videomme/`（含 `headroom_rounds.csv`、`headroom_strata.json`）、
 `results/routing_collector_ablation/collector_ablation.json`。
 
+---
+
+## 11. L2 筛选：R0（full refresh）结果（2026-09-18）— H1 被排除
+
+**执行**：本机 A6000（当时 GPU0 空闲），`results/l2_screening/R0_full_three_att.jsonl`。
+配置：Video-MME 10 样本（seed-42 同序）、128 帧、128 tokens、γ=9、K+text=1024、
+`refresh=full`、`query=three`、`bootstrap=attention`、`interval=1`、`min_change=0.0`、`fallback=none`，
+并强制开启 **`--assert-equal-s0` + `--assert-consistency`**（G5 的 T1/T2）。
+
+### 11.1 仪表不变量：实证通过
+
+| 不变量 | 结果 |
+|---|---|
+| **T2 equal-S₀** | `equal_s0 = true`，**13/13** 条 comparison |
+| **T1 选择/cache 一致性** | `consistency_mismatches = 0`（每样本前 3 次刷新校验） |
+| **T3 更新强度** | `selection_updates_applied` = **16–19 / 每样本全部轮次**（满强度，非节流） |
+| exact vs AR | **8/10**（`fallback=none` 下） |
+
+即：这是**第一次**在"初始选择与 static 逐位相同 + cache 内容经校验 + 满强度更新"的条件下得到的干净对照。
+
+### 11.2 逐样本配对（acceptance）
+
+| 样本 | static | dynamic | **Δ** |
+|---|---:|---:|---:|
+| 754-1 | 0.507 | 0.698 | **+0.191** |
+| 154-3 | 0.541 | 0.647 | **+0.106** |
+| 050-1 | 0.663 | 0.712 | +0.049 |
+| 496-3 | 0.796 | 0.796 | 0.000 |
+| 445-2 | 0.831 | 0.647 | **−0.184** |
+| 102-2 | 0.850 | 0.688 | **−0.162** |
+| 504-2 | 0.966 | 0.877 | −0.089 |
+| 647-1 | 0.966 | 0.935 | −0.031 |
+| 717-1 | 0.983 | 0.796 | **−0.187** |
+| 599-1 | 1.000 | 1.000 | 0.000 |
+
+- 均值 Δ = **−0.0308**，中位数 −0.0157，范围 **[−0.187, +0.191]**
+- **`corr(static_accept, Δ) = −0.740`**
+- 分箱（低→高 headroom）：**+0.115** / −0.115 / −0.077
+
+### 11.3 结论
+
+1. **H_headroom 在 full refresh 下依然成立**（相关系数 −0.74，低 headroom 组 +0.115）。
+   由于 R0 用的是 **full rebuild**，**H1（incremental slot 顺序是负结果主因）被排除**。
+2. 均值问题第三次出现：**−0.031 的均值掩盖了 ±0.19 的分化**——再次证明方案 §1 的重构是对的。
+3. 附带观测：本机 A6000 上 **static STD vs AR 的 decode = 62.8s vs 87.9s ≈ 1.40×**（128 tokens），
+   高于 A100 上的 1.15–1.24×——值得单独留意（见 §12 待办）。
+
+### 11.4 R1（incremental）状态
+
+R1 的对照尚未产出：本机 8 张卡全部被争用，且在 16 分钟的页缓存预热窗口内 GPU0/GPU3 均被他人作业抢走；
+R0 峰值需 **34.3 GiB**，当时无任何单卡有 ≥35 GiB 空闲。
+已改为 `--allow-shared-gpu`（只要求足够空闲显存，`timing_valid=false`，speedup 一律渲染为 `n/a`），
+并由 `/tmp/wait_r1.sh` 轮询等待合格显存后自动启动。**R1 未完成前，H1 的排除依据是"R0 下 H_headroom 依然成立"这一逻辑论证，而非 R0/R1 的直接对照。**
+
+
