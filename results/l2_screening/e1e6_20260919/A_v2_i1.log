@@ -1,0 +1,229 @@
+0, GPU-da51fc9e-5431-af29-0c53-216f3123e341, NVIDIA A100 80GB PCIe, 79032, 2017, 0
+1, GPU-88e65e27-1470-60f2-f793-907b39c13d13, NVIDIA A100 80GB PCIe, 21360, 59689, 25
+SHARED_GPU: proceeding on a non-idle GPU ( 21360 MiB used,  25% util); timing is invalid, acceptance is not.
+Loading model ...
+Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.48, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:56<03:45, 56.39s/it]Loading checkpoint shards:  40%|████      | 2/5 [01:36<02:20, 46.81s/it]Loading checkpoint shards:  60%|██████    | 3/5 [02:14<01:25, 42.86s/it]Loading checkpoint shards:  80%|████████  | 4/5 [02:56<00:42, 42.42s/it]Loading checkpoint shards: 100%|██████████| 5/5 [03:06<00:00, 30.63s/it]Loading checkpoint shards: 100%|██████████| 5/5 [03:06<00:00, 37.23s/it]
+PREPARE 1/10 050-1
+qwen-vl-utils using std_streaming_pyav to read video.
+RUN 050-1 warmup repeat=-1 ar
+DONE ar: decode=1.355s inference=49.631s
+RUN 050-1 warmup repeat=-1 static
+DONE static: decode=1.364s inference=33.256s
+RUN 050-1 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=2.050s inference=39.267s
+{"kind": "comparison", "sample_id": "050-1", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.9934017740163553, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.4924060010402749, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "050-1", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.6608058784442119, "decode_speedup_vs_static": 0.6651949852802783, "inference_speedup_vs_ar": 1.263942220743464, "inference_speedup_vs_static": 0.8469157989598265, "equal_s0": true}
+RUN 050-1 measure repeat=0 ar
+DONE ar: decode=7.575s inference=38.291s
+RUN 050-1 measure repeat=0 static
+DONE static: decode=5.705s inference=36.601s
+RUN 050-1 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=8.442s inference=43.831s
+{"kind": "comparison", "sample_id": "050-1", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.3275841088748752, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0461737435003444, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "050-1", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.8972342366996557, "decode_speedup_vs_static": 0.675839843744484, "inference_speedup_vs_ar": 0.8735969225549177, "inference_speedup_vs_static": 0.8350399997919945, "equal_s0": true}
+PREPARE 2/10 717-1
+It looks like you are trying to rescale already rescaled images. If the input images have pixel values between 0 and 1, set `do_rescale=False` to avoid rescaling them again.
+RUN 717-1 warmup repeat=-1 static
+DONE static: decode=0.497s inference=33.826s
+RUN 717-1 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=1.627s inference=32.580s
+RUN 717-1 warmup repeat=-1 ar
+DONE ar: decode=0.946s inference=36.130s
+{"kind": "comparison", "sample_id": "717-1", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9051171219074667, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0681398683310852, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "717-1", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5818882833432004, "decode_speedup_vs_static": 0.3054343886010507, "inference_speedup_vs_ar": 1.1089760019020827, "inference_speedup_vs_static": 1.0382310732720819, "equal_s0": true}
+RUN 717-1 measure repeat=0 static
+DONE static: decode=3.823s inference=34.803s
+RUN 717-1 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=7.563s inference=38.082s
+RUN 717-1 measure repeat=0 ar
+DONE ar: decode=7.614s inference=44.282s
+{"kind": "comparison", "sample_id": "717-1", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9918395633263546, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.2723682763071391, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "717-1", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.0067358143610219, "decode_speedup_vs_static": 0.5054301726388956, "inference_speedup_vs_ar": 1.1628141043421485, "inference_speedup_vs_static": 0.9138974351962347, "equal_s0": true}
+PREPARE 3/10 496-3
+RUN 496-3 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=1.627s inference=34.810s
+RUN 496-3 warmup repeat=-1 ar
+DONE ar: decode=0.945s inference=31.721s
+RUN 496-3 warmup repeat=-1 static
+DONE static: decode=0.496s inference=31.446s
+{"kind": "comparison", "sample_id": "496-3", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9062648438356375, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0087517167258795, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "496-3", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5810581010033746, "decode_speedup_vs_static": 0.3048149908877377, "inference_speedup_vs_ar": 0.9112671763764296, "inference_speedup_vs_static": 0.9033612149222835, "equal_s0": true}
+RUN 496-3 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=7.681s inference=43.243s
+RUN 496-3 measure repeat=0 ar
+DONE ar: decode=7.592s inference=38.420s
+RUN 496-3 measure repeat=0 static
+DONE static: decode=4.359s inference=40.621s
+{"kind": "comparison", "sample_id": "496-3", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.7417219434157971, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 0.9458009679263255, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "496-3", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.9883499337987529, "decode_speedup_vs_static": 0.56745563638042, "inference_speedup_vs_ar": 0.8884691418535693, "inference_speedup_vs_static": 0.9393827792347722, "equal_s0": true}
+PREPARE 4/10 754-1
+RUN 754-1 warmup repeat=-1 ar
+DONE ar: decode=0.945s inference=36.469s
+RUN 754-1 warmup repeat=-1 static
+DONE static: decode=0.495s inference=31.396s
+RUN 754-1 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=1.638s inference=37.207s
+{"kind": "comparison", "sample_id": "754-1", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.910387668349722, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.1615678006310273, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "754-1", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5766919036217725, "decode_speedup_vs_static": 0.3018716636293746, "inference_speedup_vs_ar": 0.9801732956463102, "inference_speedup_vs_static": 0.8438364898836093, "equal_s0": true}
+RUN 754-1 measure repeat=0 ar
+DONE ar: decode=7.592s inference=38.379s
+RUN 754-1 measure repeat=0 static
+DONE static: decode=6.965s inference=37.925s
+RUN 754-1 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=8.410s inference=44.158s
+{"kind": "comparison", "sample_id": "754-1", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.090034155667357, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0119711532985007, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "754-1", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.9027013774929075, "decode_speedup_vs_static": 0.8281404511955336, "inference_speedup_vs_ar": 0.8691316563760657, "inference_speedup_vs_static": 0.8588502286286991, "equal_s0": true}
+PREPARE 5/10 154-3
+RUN 154-3 warmup repeat=-1 static
+DONE static: decode=0.498s inference=38.753s
+RUN 154-3 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=1.629s inference=32.596s
+RUN 154-3 warmup repeat=-1 ar
+DONE ar: decode=0.944s inference=31.709s
+{"kind": "comparison", "sample_id": "154-3", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.8969201793017425, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 0.8182509457794771, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "154-3", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5794749960015902, "decode_speedup_vs_static": 0.3054820135947393, "inference_speedup_vs_ar": 0.9728061078746376, "inference_speedup_vs_static": 1.1888847949303976, "equal_s0": true}
+RUN 154-3 measure repeat=0 static
+DONE static: decode=5.317s inference=40.606s
+RUN 154-3 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=8.221s inference=39.295s
+RUN 154-3 measure repeat=0 ar
+DONE ar: decode=7.599s inference=43.261s
+{"kind": "comparison", "sample_id": "154-3", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.4292043321343673, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0653873634582394, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "154-3", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.9243253784479343, "decode_speedup_vs_static": 0.6467412375300814, "inference_speedup_vs_ar": 1.1009324122341009, "inference_speedup_vs_static": 1.0333634976300852, "equal_s0": true}
+PREPARE 6/10 445-2
+RUN 445-2 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=1.627s inference=38.683s
+RUN 445-2 warmup repeat=-1 ar
+DONE ar: decode=0.943s inference=31.684s
+RUN 445-2 warmup repeat=-1 static
+DONE static: decode=0.495s inference=31.454s
+{"kind": "comparison", "sample_id": "445-2", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9047319899736632, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0073229471478213, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "445-2", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5798630986977259, "decode_speedup_vs_static": 0.30443290801544404, "inference_speedup_vs_ar": 0.8190671560441973, "inference_speedup_vs_static": 0.8131127741737049, "equal_s0": true}
+RUN 445-2 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=8.557s inference=43.867s
+RUN 445-2 measure repeat=0 ar
+DONE ar: decode=7.576s inference=38.345s
+RUN 445-2 measure repeat=0 static
+DONE static: decode=4.684s inference=40.894s
+{"kind": "comparison", "sample_id": "445-2", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.6173940896423016, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 0.9376677162028874, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "445-2", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.88536459747492, "decode_speedup_vs_static": 0.5474018998491115, "inference_speedup_vs_ar": 0.8741184665132415, "inference_speedup_vs_static": 0.9322262582026495, "equal_s0": true}
+PREPARE 7/10 102-2
+RUN 102-2 warmup repeat=-1 ar
+DONE ar: decode=0.946s inference=38.984s
+RUN 102-2 warmup repeat=-1 static
+DONE static: decode=0.495s inference=31.578s
+RUN 102-2 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=2.341s inference=33.394s
+{"kind": "comparison", "sample_id": "102-2", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9120182247721904, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.2345552606440826, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "102-2", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.40394840377554714, "decode_speedup_vs_static": 0.21126807189490887, "inference_speedup_vs_ar": 1.167394566059441, "inference_speedup_vs_static": 0.9455992803840931, "equal_s0": true}
+RUN 102-2 measure repeat=0 ar
+DONE ar: decode=7.594s inference=42.559s
+RUN 102-2 measure repeat=0 static
+DONE static: decode=4.238s inference=35.315s
+RUN 102-2 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=14.812s inference=44.082s
+{"kind": "comparison", "sample_id": "102-2", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.7918312177819502, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.2051388266914578, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "102-2", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5127022578135981, "decode_speedup_vs_static": 0.28613312053367146, "inference_speedup_vs_ar": 0.9654676820861593, "inference_speedup_vs_static": 0.8011256966441928, "equal_s0": true}
+PREPARE 8/10 647-1
+RUN 647-1 warmup repeat=-1 static
+DONE static: decode=0.494s inference=31.143s
+RUN 647-1 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=7.304s inference=36.246s
+RUN 647-1 warmup repeat=-1 ar
+DONE ar: decode=0.949s inference=33.631s
+{"kind": "comparison", "sample_id": "647-1", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9183979780661449, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0799019121332545, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "647-1", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.12988605634104888, "decode_speedup_vs_static": 0.06770548021114028, "inference_speedup_vs_ar": 0.9278613755222669, "inference_speedup_vs_static": 0.8592089384204863, "equal_s0": true}
+RUN 647-1 measure repeat=0 static
+DONE static: decode=3.963s inference=34.933s
+RUN 647-1 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=7.885s inference=38.572s
+RUN 647-1 measure repeat=0 ar
+DONE ar: decode=7.615s inference=41.774s
+{"kind": "comparison", "sample_id": "647-1", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.921704911444072, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.1958362475699111, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "647-1", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.9657757383695448, "decode_speedup_vs_static": 0.5025619347789506, "inference_speedup_vs_ar": 1.0830138802656166, "inference_speedup_vs_static": 0.9056539994221083, "equal_s0": true}
+PREPARE 9/10 504-2
+RUN 504-2 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=2.431s inference=41.559s
+RUN 504-2 warmup repeat=-1 ar
+DONE ar: decode=0.944s inference=31.706s
+RUN 504-2 warmup repeat=-1 static
+DONE static: decode=0.495s inference=31.436s
+{"kind": "comparison", "sample_id": "504-2", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.9064046950015718, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0085838109037848, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "504-2", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.3884507945239556, "decode_speedup_vs_static": 0.2037609304794727, "inference_speedup_vs_ar": 0.7629060741339618, "inference_speedup_vs_static": 0.7564131665471878, "equal_s0": true}
+RUN 504-2 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=7.587s inference=43.134s
+RUN 504-2 measure repeat=0 ar
+DONE ar: decode=7.569s inference=38.358s
+RUN 504-2 measure repeat=0 static
+DONE static: decode=4.359s inference=35.320s
+{"kind": "comparison", "sample_id": "504-2", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.7363103350071722, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.0860096575647784, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "504-2", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.9976137739801433, "decode_speedup_vs_static": 0.5745596013952323, "inference_speedup_vs_ar": 0.8892800516500815, "inference_speedup_vs_static": 0.8188509609059693, "equal_s0": true}
+PREPARE 10/10 599-1
+RUN 599-1 warmup repeat=-1 ar
+DONE ar: decode=0.945s inference=38.124s
+RUN 599-1 warmup repeat=-1 static
+DONE static: decode=0.496s inference=31.461s
+RUN 599-1 warmup repeat=-1 dynamic_v2
+DONE dynamic_v2: decode=1.657s inference=37.334s
+{"kind": "comparison", "sample_id": "599-1", "phase": "warmup", "repeat": -1, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.904379628009468, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.2118000977174268, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "599-1", "phase": "warmup", "repeat": -1, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.5701609959805695, "decode_speedup_vs_static": 0.299394609979379, "inference_speedup_vs_ar": 1.0211724113121952, "inference_speedup_vs_static": 0.8426904843758453, "equal_s0": true}
+RUN 599-1 measure repeat=0 ar
+DONE ar: decode=7.582s inference=38.441s
+RUN 599-1 measure repeat=0 static
+DONE static: decode=3.792s inference=34.769s
+RUN 599-1 measure repeat=0 dynamic_v2
+DONE dynamic_v2: decode=10.619s inference=41.276s
+{"kind": "comparison", "sample_id": "599-1", "phase": "measure", "repeat": 0, "method": "static", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 1.999703132788559, "decode_speedup_vs_static": 1.0, "inference_speedup_vs_ar": 1.1055989452332524, "inference_speedup_vs_static": 1.0, "equal_s0": null}
+{"kind": "comparison", "sample_id": "599-1", "phase": "measure", "repeat": 0, "method": "dynamic_v2", "token_equal": true, "mismatch_token_count": 0, "token_level_agreement": 1.0, "decode_speedup_vs_ar": 0.713979810291477, "decode_speedup_vs_static": 0.35704290231112545, "inference_speedup_vs_ar": 0.9313084386977625, "inference_speedup_vs_static": 0.8423564826224403, "equal_s0": true}
+COMPLETE /public/home/xlwang/mcy/STD_assets/results/e1e6_20260919/e1e6_20260919_A_v2_i1.jsonl
+A100 dynamic STD comparison — e1e6_20260919_A_v2_i1
+
+Video-MME: 10 available-subset samples, seed-42 order; 128 requested frames; 128 fixed output tokens; 1 measured repetitions per method/sample after 16-token warmups.
+Physical GPU 1; FP16; sparse backend gqa_sdpa; collector=v2; refresh=incremental; update_interval=1; min_change=0.0; gamma=9; query_mode=three; bootstrap=attention; coverage=0.25; value_weight=0.25; K+text=1024; fallback=none.
+
+> **WARNING: `timing_valid=false`** — this run shared a non-idle GPU. All wall-clock numbers and speedups are invalid and are shown as `n/a`. Acceptance and exactness remain valid because they are deterministic for fixed inputs.
+
+Times below sum each sample's median across repetitions. Speedup = baseline / method; greater than 1 is faster.
+
+| Method | Prefill (s) | Decode (s) | vs AR | vs static | Inference (s) | Inf. vs AR | Inf. vs static | Exact | Peak GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ar | 325.593 | 75.906 | n/a | n/a | 402.110 | n/a | n/a | 10/10 | 29.62 |
+| static | 323.082 | 47.204 | n/a | n/a | 371.788 | n/a | n/a | 10/10 | 29.62 |
+| dynamic_v2 | 326.811 | 89.777 | n/a | n/a | 419.539 | n/a | n/a | 10/10 | 29.62 |
+
+Component totals (when --profile-components is enabled; medians per sample):
+| Method | Cache init | Selection prefill | Selection/top-k | Dense prefill | Sparse cache | Draft | Verify | Bonus | Cache adjust |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ar | 0.610 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| static | 0.610 | 323.082 | 0.168 | 0.000 | 0.722 | 33.420 | 10.136 | 3.634 | 0.003 |
+| dynamic_v2 | 0.609 | 326.811 | 0.357 | 0.000 | 1.965 | 36.366 | 11.153 | 3.931 | 0.003 |
+
+Per-sample paired acceptance (H_headroom; the aggregate mean is not trusted):
+| Method | Sample | Static accept | Dynamic accept | delta |
+|---|---|---:|---:|---:|
+| dynamic_v2 | 050-1 | 0.623 | 0.667 | +0.044 |
+| dynamic_v2 | 717-1 | 0.983 | 0.857 | -0.126 |
+| dynamic_v2 | 496-3 | 0.864 | 0.762 | -0.102 |
+| dynamic_v2 | 754-1 | 0.495 | 0.671 | +0.175 |
+| dynamic_v2 | 154-3 | 0.692 | 0.703 | +0.011 |
+| dynamic_v2 | 445-2 | 0.790 | 0.647 | -0.143 |
+| dynamic_v2 | 102-2 | 0.891 | 0.688 | -0.203 |
+| dynamic_v2 | 647-1 | 0.966 | 0.943 | -0.024 |
+| dynamic_v2 | 504-2 | 0.857 | 0.796 | -0.061 |
+| dynamic_v2 | 599-1 | 1.000 | 1.000 | +0.000 |
+
+Stratified by static headroom (equal-count bins, LOW headroom first):
+| Method | Bin | n | static range | mean static accept | mean delta accept |
+|---|---:|---:|---|---:|---:|
+| dynamic_v2 | 0 | 3 | 0.495-0.692 | 0.603 | +0.077 |
+| dynamic_v2 | 1 | 3 | 0.790-0.864 | 0.837 | -0.102 |
+| dynamic_v2 | 2 | 4 | 0.891-1.000 | 0.960 | -0.088 |
+
+Measured generation continues after EOS to equalize work. Inference includes prefill and decoding; both timing measures exclude model loading and video processing. Exact-trial counts compare complete token sequences against AR. Unequal outputs do not demonstrate lossless speedup.
+
+This small available-video subset is exploratory, not a full Video-MME accuracy evaluation. The synchronized total decode times include all dynamic selection/collection/refresh overhead.
+
+Raw trials: e1e6_20260919_A_v2_i1.jsonl
+Git base: 40efa1e708670cfd2bbb62354930b1a33ca455f0; worktree modified=True; exact source hashes are authoritative in the raw manifest.
+

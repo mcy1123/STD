@@ -1,0 +1,10 @@
+[10:24:28] TAG=e1e6_20260919 GPU=1 LIMIT=10 repo=/public/home/xlwang/mcy/Project/STD-latest
+0, 79032 MiB, 2017 MiB, 0 %
+1, 21360 MiB, 59689 MiB, 48 %
+[10:24:28] [A_v2_i1] START collector=v2 interval=1 min_change=0.00
+[10:24:28] GPU1 ready: 59689 MiB free (need 26624 MiB)
+[11:15:51] [A_v2_i1] DONE (summarize rc=0)
+[11:15:51] [B_v2_i4] SKIP: /public/home/xlwang/mcy/STD_assets/results/e1e6_20260919/e1e6_20260919_B_v2_i4.jsonl already exists
+[11:15:51] [C_v3_i1] SKIP: /public/home/xlwang/mcy/STD_assets/results/e1e6_20260919/e1e6_20260919_C_v3_i1.jsonl already exists
+[11:15:51] [D_v3_i4] SKIP: /public/home/xlwang/mcy/STD_assets/results/e1e6_20260919/e1e6_20260919_D_v3_i4.jsonl already exists
+[11:15:51] MATRIX_DONE
