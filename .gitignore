@@ -35,3 +35,6 @@ checkpoints/
 
 # Third-party spec-workflow tool scaffolding (templates only, not project content)
 .spec-workflow/
+
+# Scratch dir for scripts/run_dynamic_matrix.sh when TMPDIR is not writable
+.matrix_tmp/
